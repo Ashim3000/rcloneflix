@@ -5,7 +5,7 @@ import { useAppStore } from "../../store/appStore";
 import { verifyPin } from "../../lib/pin";
 
 type Props = {
-  onUnlocked: () => void;
+  onUnlocked?: () => void;
 };
 
 export function AdultPinLock({ onUnlocked }: Props) {
@@ -26,7 +26,7 @@ export function AdultPinLock({ onUnlocked }: Props) {
       const ok = await verifyPin(pin, adultSettings.pinHash);
       if (ok) {
         setAdultUnlocked(true);
-        onUnlocked();
+        onUnlocked?.();
       } else {
         setShaking(true);
         setError(true);

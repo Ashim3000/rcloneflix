@@ -9,25 +9,33 @@ import { ApiKeysStep } from "../components/setup/ApiKeysStep";
 import { LibrariesStep } from "../components/setup/LibrariesStep";
 import { SetupSteps } from "../components/setup/SetupSteps";
 
-const STEPS = ["welcome", "google", "rclone", "apikeys", "libraries"] as const;
-type Step = typeof STEPS[number];
+const STEPS = [
+  { number: 1, id: "google",    label: "Sign In" },
+  { number: 2, id: "rclone",   label: "Rclone" },
+  { number: 3, id: "apikeys",  label: "API Keys" },
+  { number: 4, id: "libraries",label: "Libraries" },
+] as const;
+
+type StepId = typeof STEPS[number]["id"];
 
 export function SetupPage() {
-  const [step, setStep] = useState<Step>("google"); // Google first
-  const { completeSetup, setupComplete, googleAccount } = useAppStore();
+  const [stepId, setStepId] = useState<StepId>("google");
+  const { completeSetup } = useAppStore();
   const navigate = useNavigate();
 
-  const stepIndex = STEPS.indexOf(step);
+  const currentStep = STEPS.find((s) => s.id === stepId)!;
 
   const next = () => {
-    const nextStep = STEPS[stepIndex + 1];
-    if (nextStep) setStep(nextStep);
+    const idx = STEPS.findIndex((s) => s.id === stepId);
+    const nextStep = STEPS[idx + 1];
+    if (nextStep) setStepId(nextStep.id);
     else finish();
   };
 
   const prev = () => {
-    const prevStep = STEPS[stepIndex - 1];
-    if (prevStep) setStep(prevStep);
+    const idx = STEPS.findIndex((s) => s.id === stepId);
+    const prevStep = STEPS[idx - 1];
+    if (prevStep) setStepId(prevStep.id);
   };
 
   const finish = () => {
@@ -38,37 +46,34 @@ export function SetupPage() {
   return (
     <div className="min-h-screen bg-void flex items-center justify-center p-6">
       <div className="w-full max-w-2xl">
-        {/* Progress dots */}
+        {/* Progress indicator */}
         <div className="flex justify-center mb-10">
           <SetupSteps
-            steps={STEPS.map((s) => ({
-              id: s,
-              label: s.charAt(0).toUpperCase() + s.slice(1),
-            }))}
-            currentStep={step}
-            onStepClick={(id) => setStep(id as Step)}
+            steps={STEPS.map((s) => ({ number: s.number, label: s.label }))}
+            currentStep={currentStep.number}
           />
         </div>
 
         <AnimatePresence mode="wait">
           <motion.div
-            key={step}
+            key={stepId}
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -20 }}
             transition={{ duration: 0.25 }}
           >
-            {step === "google" && (
-              <GoogleSignInStep
-                isFirstStep
-                onNext={next}
-                onSkip={next}
-              />
+            {stepId === "google" && (
+              <GoogleSignInStep isFirstStep onNext={next} onSkip={next} />
             )}
-            {step === "welcome" && <WelcomeStep onNext={next} />}
-            {step === "rclone" && <RcloneConfigStep onNext={next} onBack={prev} />}
-            {step === "apikeys" && <ApiKeysStep onNext={next} onBack={prev} />}
-            {step === "libraries" && <LibrariesStep onNext={finish} onBack={prev} />}
+            {stepId === "rclone" && (
+              <RcloneConfigStep onNext={next} onBack={prev} />
+            )}
+            {stepId === "apikeys" && (
+              <ApiKeysStep onNext={next} onBack={prev} />
+            )}
+            {stepId === "libraries" && (
+              <LibrariesStep onNext={finish} onBack={prev} />
+            )}
           </motion.div>
         </AnimatePresence>
       </div>
