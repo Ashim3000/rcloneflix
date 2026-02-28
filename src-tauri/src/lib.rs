@@ -1,8 +1,6 @@
 mod commands;
 
-use commands::player::ServeProcesses;
-use std::collections::HashMap;
-use std::sync::Mutex;
+use commands::player::VlcManager;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -13,7 +11,11 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
-        .manage(ServeProcesses(Mutex::new(HashMap::new())))
+        .setup(|app| {
+            let vlc = VlcManager::new(app.handle().clone());
+            app.manage(vlc);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::rclone::parse_rclone_config,
             commands::rclone::list_remote_path,
@@ -24,7 +26,12 @@ pub fn run() {
             commands::scan::scan_library_files,
             commands::scan::parse_media_filename,
             commands::scan::hash_remote_path,
-            commands::player::start_stream_session,
+            commands::player::open_media,
+            commands::player::player_play,
+            commands::player::player_pause,
+            commands::player::player_seek,
+            commands::player::player_set_volume,
+            commands::player::player_stop,
             commands::player::stop_stream_session,
             commands::player::stop_all_sessions,
             commands::player::get_media_info,
@@ -33,19 +40,6 @@ pub fn run() {
             commands::google::load_google_tokens,
             commands::google::clear_google_tokens,
         ])
-        .setup(|app| {
-            Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
-                // Kill all rclone serve processes on close
-                let state = window.app_handle().state::<ServeProcesses>();
-                let mut procs = state.0.lock().unwrap();
-                for (_, mut child) in procs.drain() {
-                    let _ = child.kill();
-                }
-            }
-        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

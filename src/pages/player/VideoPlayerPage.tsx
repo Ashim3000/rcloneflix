@@ -6,13 +6,14 @@ import {
   SkipBack, SkipForward, ChevronLeft, Loader2,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useAppStore, type MediaItem } from "../../store/appStore";
 
 type PlayerState = {
   playing: boolean;
-  currentTime: number;
-  duration: number;
-  volume: number;
+  currentTime: number;  // seconds
+  duration: number;     // seconds
+  volume: number;       // 0-1
   muted: boolean;
   fullscreen: boolean;
   buffering: boolean;
@@ -25,24 +26,25 @@ export function VideoPlayerPage() {
   const navigate = useNavigate();
   const { item, resumeAt } = (location.state ?? {}) as { item: MediaItem; resumeAt?: number };
 
-  const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const sessionIdRef = useRef(`session-${Date.now()}`);
+  const seekRafRef = useRef<number | null>(null);
+  // Track current time via ref so progress interval doesn't need stale closure
+  const currentTimeRef = useRef(0);
+  const durationRef = useRef(0);
 
   const { rcloneConfigPath, libraries, updateWatchProgress, watchProgress } = useAppStore();
 
-  const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-
   const [ps, setPs] = useState<PlayerState>({
     playing: false, currentTime: 0, duration: 0,
     volume: 1, muted: false, fullscreen: false,
     buffering: true, showControls: true, error: null,
   });
 
-  // Start stream session
+  // ── Start playback ──────────────────────────────────────────────────────────
+
   useEffect(() => {
     if (!item) return;
 
@@ -53,59 +55,103 @@ export function VideoPlayerPage() {
       return;
     }
 
-    // Build relative path from library root
     const libRoot = library.remotePath.replace(/\/$/, "");
     const relPath = item.remotePath.startsWith(libRoot + "/")
       ? item.remotePath.slice(libRoot.length + 1)
       : item.remotePath.split("/").pop() ?? item.filename;
 
-    invoke<{ session_id: string; serve_url: string; file_url: string }>(
-      "start_stream_session",
-      {
-        configPath: rcloneConfigPath,
-        remoteRoot: library.remotePath,
-        filePath: relPath,
-        sessionId: sessionIdRef.current,
-      }
-    )
-      .then((session) => {
-        setStreamUrl(session.file_url);
-        setLoading(false);
-      })
+    const existing = watchProgress[item.id];
+    const startMs = Math.round((resumeAt ?? existing?.position ?? 0) * 1000);
+
+    invoke("open_media", {
+      configPath: rcloneConfigPath,
+      remoteRoot: library.remotePath,
+      filePath: relPath,
+      startMs,
+    })
+      .then(() => setLoading(false))
       .catch((e) => {
         setPs((s) => ({ ...s, error: String(e), buffering: false }));
         setLoading(false);
       });
 
     return () => {
-      invoke("stop_stream_session", { sessionId: sessionIdRef.current }).catch(() => {});
+      invoke("player_stop").catch(() => {});
     };
   }, [item?.id]);
 
-  // Resume position
-  useEffect(() => {
-    if (!streamUrl || !videoRef.current) return;
-    const existing = item ? watchProgress[item.id] : null;
-    const startAt = resumeAt ?? existing?.position ?? 0;
-    if (startAt > 5) videoRef.current.currentTime = startAt;
-  }, [streamUrl]);
+  // ── VLC event listeners ─────────────────────────────────────────────────────
 
-  // Progress saving
+  useEffect(() => {
+    if (!item) return;
+    const unlisteners: Array<() => void> = [];
+
+    listen<{ time_ms: number; duration_ms: number }>("vlc:time", (ev) => {
+      const secs = ev.payload.time_ms / 1000;
+      const dur = ev.payload.duration_ms / 1000;
+      currentTimeRef.current = secs;
+      durationRef.current = dur;
+      // Batch the seek bar update into the next animation frame so it doesn't
+      // force a synchronous React re-render on the VLC event thread.
+      if (seekRafRef.current !== null) cancelAnimationFrame(seekRafRef.current);
+      seekRafRef.current = requestAnimationFrame(() => {
+        seekRafRef.current = null;
+        setPs((s) => ({ ...s, currentTime: secs, duration: dur }));
+      });
+    }).then((fn) => unlisteners.push(fn));
+
+    listen<{ playing: boolean; buffering: boolean; ended: boolean }>(
+      "vlc:state",
+      (ev) => {
+        setPs((s) => ({
+          ...s,
+          playing: ev.payload.playing,
+          buffering: ev.payload.buffering,
+        }));
+        if (ev.payload.ended && item) {
+          updateWatchProgress({
+            itemId: item.id,
+            position: durationRef.current,
+            duration: durationRef.current,
+            completed: true,
+            lastWatchedAt: Date.now(),
+          });
+        }
+      },
+    ).then((fn) => unlisteners.push(fn));
+
+    listen<{ message: string }>("vlc:error", (ev) => {
+      setPs((s) => ({ ...s, error: ev.payload.message, buffering: false }));
+    }).then((fn) => unlisteners.push(fn));
+
+    return () => {
+      unlisteners.forEach((fn) => fn());
+      if (seekRafRef.current !== null) cancelAnimationFrame(seekRafRef.current);
+    };
+  }, [item?.id]);
+
+  // ── Progress saving every 10 s ──────────────────────────────────────────────
+
   useEffect(() => {
     if (!item) return;
     progressTimerRef.current = setInterval(() => {
-      const v = videoRef.current;
-      if (!v || !v.duration) return;
+      const pos = currentTimeRef.current;
+      const dur = durationRef.current;
+      if (!dur) return;
       updateWatchProgress({
         itemId: item.id,
-        position: v.currentTime,
-        duration: v.duration,
-        completed: v.currentTime / v.duration > 0.9,
+        position: pos,
+        duration: dur,
+        completed: dur > 0 && pos / dur > 0.9,
         lastWatchedAt: Date.now(),
       });
     }, 10000);
-    return () => { if (progressTimerRef.current) clearInterval(progressTimerRef.current); };
+    return () => {
+      if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+    };
   }, [item?.id]);
+
+  // ── Controls helpers ────────────────────────────────────────────────────────
 
   const showControlsTemp = useCallback(() => {
     setPs((s) => ({ ...s, showControls: true }));
@@ -116,80 +162,127 @@ export function VideoPlayerPage() {
   }, []);
 
   const togglePlay = useCallback(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    if (v.paused) v.play(); else v.pause();
+    setPs((s) => {
+      if (s.playing) {
+        invoke("player_pause").catch(() => {});
+        return { ...s, playing: false };
+      } else {
+        invoke("player_play").catch(() => {});
+        return { ...s, playing: true };
+      }
+    });
     showControlsTemp();
   }, [showControlsTemp]);
 
   const skipBy = useCallback((secs: number) => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + secs));
+    setPs((s) => {
+      const next = Math.max(0, Math.min(s.duration, s.currentTime + secs));
+      invoke("player_seek", { ms: Math.round(next * 1000) }).catch(() => {});
+      return { ...s, currentTime: next };
+    });
     showControlsTemp();
   }, [showControlsTemp]);
 
   const handleBack = useCallback(() => {
-    const v = videoRef.current;
-    if (v && item) {
+    if (item) {
       updateWatchProgress({
-        itemId: item.id, position: v.currentTime,
-        duration: v.duration || ps.duration,
-        completed: ps.duration > 0 && v.currentTime / ps.duration > 0.9,
+        itemId: item.id,
+        position: currentTimeRef.current,
+        duration: durationRef.current || ps.duration,
+        completed:
+          durationRef.current > 0 &&
+          currentTimeRef.current / durationRef.current > 0.9,
         lastWatchedAt: Date.now(),
       });
     }
     navigate(-1);
   }, [item, ps.duration]);
 
-  const toggleFullscreen = () => {
+  const setVolume = useCallback((vol: number, muted: boolean) => {
+    const effective = muted ? 0 : vol;
+    invoke("player_set_volume", { vol: Math.round(effective * 100) }).catch(() => {});
+    setPs((s) => ({ ...s, volume: vol, muted }));
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
     if (!document.fullscreenElement) {
-      el.requestFullscreen();
+      el.requestFullscreen().catch(() => {});
       setPs((s) => ({ ...s, fullscreen: true }));
     } else {
-      document.exitFullscreen();
+      document.exitFullscreen().catch(() => {});
       setPs((s) => ({ ...s, fullscreen: false }));
     }
-  };
+  }, []);
 
-  // Keyboard shortcuts
+  // ── Keyboard shortcuts ──────────────────────────────────────────────────────
+
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       switch (e.code) {
-        case "Space": e.preventDefault(); togglePlay(); break;
-        case "ArrowRight": skipBy(10); break;
-        case "ArrowLeft": skipBy(-10); break;
-        case "ArrowUp": {
-          const v = videoRef.current;
-          if (v) { v.volume = Math.min(1, v.volume + 0.1); setPs(s => ({...s, volume: v.volume})); }
+        case "Space":
+          e.preventDefault();
+          togglePlay();
           break;
-        }
-        case "ArrowDown": {
-          const v = videoRef.current;
-          if (v) { v.volume = Math.max(0, v.volume - 0.1); setPs(s => ({...s, volume: v.volume})); }
+        case "ArrowRight":
+          skipBy(10);
           break;
-        }
-        case "KeyF": toggleFullscreen(); break;
-        case "KeyM": {
-          const v = videoRef.current;
-          if (v) { v.muted = !v.muted; setPs(s => ({...s, muted: v.muted})); }
+        case "ArrowLeft":
+          skipBy(-10);
           break;
-        }
-        case "Escape": if (!document.fullscreenElement) handleBack(); break;
+        case "ArrowUp":
+          setPs((s) => {
+            const v = Math.min(1, s.volume + 0.1);
+            invoke("player_set_volume", { vol: Math.round(v * 100) }).catch(() => {});
+            return { ...s, volume: v, muted: false };
+          });
+          break;
+        case "ArrowDown":
+          setPs((s) => {
+            const v = Math.max(0, s.volume - 0.1);
+            invoke("player_set_volume", { vol: Math.round(v * 100) }).catch(() => {});
+            return { ...s, volume: v };
+          });
+          break;
+        case "KeyF":
+          toggleFullscreen();
+          break;
+        case "KeyM":
+          setPs((s) => {
+            const muted = !s.muted;
+            invoke("player_set_volume", {
+              vol: muted ? 0 : Math.round(s.volume * 100),
+            }).catch(() => {});
+            return { ...s, muted };
+          });
+          break;
+        case "Escape":
+          if (!document.fullscreenElement) handleBack();
+          break;
       }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [togglePlay, skipBy, handleBack]);
+  }, [togglePlay, skipBy, toggleFullscreen, handleBack]);
+
+  // ── Seek bar ────────────────────────────────────────────────────────────────
+
+  const handleSeek = useCallback((seconds: number) => {
+    currentTimeRef.current = seconds;
+    setPs((s) => ({ ...s, currentTime: seconds }));
+    invoke("player_seek", { ms: Math.round(seconds * 1000) }).catch(() => {});
+  }, []);
+
+  // ── Misc ────────────────────────────────────────────────────────────────────
 
   const formatTime = (s: number) => {
     if (!s || isNaN(s)) return "0:00";
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     const sec = Math.floor(s % 60);
-    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+    if (h > 0)
+      return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
     return `${m}:${String(sec).padStart(2, "0")}`;
   };
 
@@ -210,11 +303,15 @@ export function VideoPlayerPage() {
       onMouseMove={showControlsTemp}
       style={{ cursor: ps.showControls ? "default" : "none" }}
     >
+      {/* VLC renders into the native window behind this div.
+          Keep this area transparent so the video shows through. */}
+      <div className="absolute inset-0" style={{ background: "transparent" }} />
+
       {/* Loading */}
       {loading && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 z-10">
           <Loader2 size={40} className="text-accent animate-spin" />
-          <p className="text-white/70 font-body text-sm">Starting stream...</p>
+          <p className="text-white/70 font-body text-sm">Starting stream…</p>
         </div>
       )}
 
@@ -225,45 +322,22 @@ export function VideoPlayerPage() {
           <p className="text-white/50 font-body text-sm text-center">
             Make sure rclone can access this remote and the file exists.
           </p>
-          <button onClick={handleBack} className="btn-secondary mt-2">Go Back</button>
+          <button onClick={handleBack} className="btn-secondary mt-2">
+            Go Back
+          </button>
         </div>
-      )}
-
-      {/* Video */}
-      {streamUrl && (
-        <video
-          ref={videoRef}
-          src={streamUrl}
-          className="w-full h-full object-contain"
-          onClick={togglePlay}
-          onTimeUpdate={(e) => setPs((s) => ({ ...s, currentTime: e.currentTarget.currentTime }))}
-          onDurationChange={(e) => setPs((s) => ({ ...s, duration: e.currentTarget.duration }))}
-          onWaiting={() => setPs((s) => ({ ...s, buffering: true }))}
-          onPlaying={() => setPs((s) => ({ ...s, buffering: false }))}
-          onCanPlay={() => setPs((s) => ({ ...s, buffering: false }))}
-          onPlay={() => setPs((s) => ({ ...s, playing: true }))}
-          onPause={() => setPs((s) => ({ ...s, playing: false }))}
-          onError={(e) => {
-            const err = e.currentTarget.error;
-            const msg = err ? `Video error: ${err.message || `code ${err.code}`}` : "Failed to load video";
-            setPs((s) => ({ ...s, error: msg, buffering: false }));
-          }}
-          onEnded={() => {
-            if (item) updateWatchProgress({
-              itemId: item.id, position: ps.duration, duration: ps.duration,
-              completed: true, lastWatchedAt: Date.now(),
-            });
-          }}
-          autoPlay
-          playsInline
-        />
       )}
 
       {/* Buffering spinner */}
       {ps.buffering && !loading && !ps.error && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
           <Loader2 size={48} className="text-white/50 animate-spin" />
         </div>
+      )}
+
+      {/* Click overlay for play/pause */}
+      {!ps.error && (
+        <div className="absolute inset-0 z-20" onClick={togglePlay} />
       )}
 
       {/* Controls */}
@@ -274,19 +348,25 @@ export function VideoPlayerPage() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
-            className="absolute inset-0 pointer-events-none"
+            className="absolute inset-0 pointer-events-none z-30"
           >
             {/* Top bar */}
             <div className="absolute top-0 left-0 right-0 h-20 bg-gradient-to-b from-black/80 to-transparent pointer-events-auto">
               <div className="flex items-center gap-3 px-5 py-4">
-                <button onClick={handleBack} className="text-white/80 hover:text-white transition-colors p-1">
+                <button
+                  onClick={handleBack}
+                  className="text-white/80 hover:text-white transition-colors p-1"
+                >
                   <ChevronLeft size={24} />
                 </button>
                 <div>
-                  <p className="text-white font-body font-semibold text-sm">{item.showTitle ?? item.title}</p>
+                  <p className="text-white font-body font-semibold text-sm">
+                    {item.showTitle ?? item.title}
+                  </p>
                   {item.season && item.episode && (
                     <p className="text-white/60 font-body text-xs">
-                      S{String(item.season).padStart(2, "0")}E{String(item.episode).padStart(2, "0")}
+                      S{String(item.season).padStart(2, "0")}E
+                      {String(item.episode).padStart(2, "0")}
                       {item.episodeTitle ? ` · ${item.episodeTitle}` : ""}
                     </p>
                   )}
@@ -296,16 +376,14 @@ export function VideoPlayerPage() {
 
             {/* Bottom controls */}
             <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 to-transparent pt-16 px-5 pb-5 pointer-events-auto">
-              {/* Seek */}
+              {/* Seek bar */}
               <div className="relative mb-3 group/seek">
                 <input
-                  type="range" min={0} max={ps.duration || 100} value={ps.currentTime}
-                  onChange={(e) => {
-                    const v = videoRef.current;
-                    const t = parseFloat(e.target.value);
-                    if (v) v.currentTime = t;
-                    setPs((s) => ({ ...s, currentTime: t }));
-                  }}
+                  type="range"
+                  min={0}
+                  max={ps.duration || 100}
+                  value={ps.currentTime}
+                  onChange={(e) => handleSeek(parseFloat(e.target.value))}
                   className="w-full h-1 appearance-none rounded-full cursor-pointer
                     [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3
                     [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full
@@ -318,7 +396,10 @@ export function VideoPlayerPage() {
               </div>
 
               <div className="flex items-center gap-3">
-                <button onClick={() => skipBy(-10)} className="text-white/70 hover:text-white transition-colors">
+                <button
+                  onClick={() => skipBy(-10)}
+                  className="text-white/70 hover:text-white transition-colors"
+                >
                   <SkipBack size={19} />
                 </button>
                 <button
@@ -329,7 +410,10 @@ export function VideoPlayerPage() {
                     ? <Pause size={18} className="text-white" />
                     : <Play size={18} className="text-white ml-0.5" fill="white" />}
                 </button>
-                <button onClick={() => skipBy(10)} className="text-white/70 hover:text-white transition-colors">
+                <button
+                  onClick={() => skipBy(10)}
+                  className="text-white/70 hover:text-white transition-colors"
+                >
                   <SkipForward size={19} />
                 </button>
                 <span className="text-white/60 font-mono text-xs ml-1">
@@ -340,22 +424,20 @@ export function VideoPlayerPage() {
 
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => {
-                      const v = videoRef.current;
-                      if (v) { v.muted = !v.muted; setPs(s => ({...s, muted: v.muted})); }
-                    }}
+                    onClick={() => setVolume(ps.volume, !ps.muted)}
                     className="text-white/70 hover:text-white transition-colors"
                   >
-                    {ps.muted || ps.volume === 0 ? <VolumeX size={17} /> : <Volume2 size={17} />}
+                    {ps.muted || ps.volume === 0
+                      ? <VolumeX size={17} />
+                      : <Volume2 size={17} />}
                   </button>
                   <input
-                    type="range" min={0} max={1} step={0.05} value={ps.muted ? 0 : ps.volume}
-                    onChange={(e) => {
-                      const v = videoRef.current;
-                      const vol = parseFloat(e.target.value);
-                      if (v) v.volume = vol;
-                      setPs((s) => ({ ...s, volume: vol, muted: vol === 0 }));
-                    }}
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={ps.muted ? 0 : ps.volume}
+                    onChange={(e) => setVolume(parseFloat(e.target.value), false)}
                     className="w-20 h-1 appearance-none bg-white/25 rounded-full cursor-pointer
                       [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3
                       [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full
@@ -363,7 +445,10 @@ export function VideoPlayerPage() {
                   />
                 </div>
 
-                <button onClick={toggleFullscreen} className="text-white/70 hover:text-white transition-colors ml-1">
+                <button
+                  onClick={toggleFullscreen}
+                  className="text-white/70 hover:text-white transition-colors ml-1"
+                >
                   {ps.fullscreen ? <Minimize size={17} /> : <Maximize size={17} />}
                 </button>
               </div>
