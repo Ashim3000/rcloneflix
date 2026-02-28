@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build output
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# Cargo.lock is intentionally tracked for reproducible builds (this is an app, not a library)
