@@ -13,6 +13,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore, type AppConfig, type MediaItem, type WatchProgress } from "../store/appStore";
 
+// ─── Bundled OAuth client ──────────────────────────────────────────────────────
+// Create a "Desktop app" OAuth 2.0 credential at https://console.cloud.google.com
+// Enable: Google Drive API, Google People API (for userinfo).
+// No client secret is needed — desktop apps use PKCE only.
+const GOOGLE_CLIENT_ID = "YOUR_CLIENT_ID.apps.googleusercontent.com";
+
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
 const BACKUP_FILENAME = "rcloneflix-backup.json";
@@ -82,16 +88,14 @@ async function decryptData(encryptedB64: string, googleSub: string): Promise<str
 
 // ─── OAuth PKCE Flow ──────────────────────────────────────────────────────────
 
-export async function startGoogleSignIn(clientId: string): Promise<void> {
+export async function startGoogleSignIn(): Promise<void> {
   const verifier = generateCodeVerifier();
   const challenge = await generateCodeChallenge(verifier);
 
-  // Store verifier for later exchange
   sessionStorage.setItem("pkce_verifier", verifier);
-  sessionStorage.setItem("oauth_client_id", clientId);
 
   const params = new URLSearchParams({
-    client_id: clientId,
+    client_id: GOOGLE_CLIENT_ID,
     redirect_uri: "http://localhost:9876/oauth/callback",
     response_type: "code",
     scope: SCOPES,
@@ -107,7 +111,7 @@ export async function startGoogleSignIn(clientId: string): Promise<void> {
   await invoke("start_google_oauth", { authUrl, port: 9876 });
 }
 
-export async function exchangeOAuthCode(code: string, clientId: string): Promise<{
+export async function exchangeOAuthCode(code: string): Promise<{
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
@@ -122,7 +126,7 @@ export async function exchangeOAuthCode(code: string, clientId: string): Promise
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       code,
-      client_id: clientId,
+      client_id: GOOGLE_CLIENT_ID,
       redirect_uri: "http://localhost:9876/oauth/callback",
       code_verifier: verifier,
       grant_type: "authorization_code",
@@ -148,7 +152,7 @@ export async function exchangeOAuthCode(code: string, clientId: string): Promise
   };
 }
 
-export async function refreshAccessToken(refreshToken: string, clientId: string): Promise<{
+export async function refreshAccessToken(refreshToken: string): Promise<{
   accessToken: string;
   expiresAt: number;
 }> {
@@ -157,7 +161,7 @@ export async function refreshAccessToken(refreshToken: string, clientId: string)
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       refresh_token: refreshToken,
-      client_id: clientId,
+      client_id: GOOGLE_CLIENT_ID,
       grant_type: "refresh_token",
     }),
   });
@@ -179,9 +183,13 @@ async function getValidToken(): Promise<string | null> {
     return account.accessToken;
   }
 
-  // Need to refresh — requires client ID from settings
-  // For now return existing token and let the caller handle 401
-  return account.accessToken;
+  try {
+    const { accessToken, expiresAt } = await refreshAccessToken(account.refreshToken);
+    useAppStore.getState().setGoogleAccount({ ...account, accessToken, expiresAt });
+    return accessToken;
+  } catch {
+    return account.accessToken;
+  }
 }
 
 // ─── Drive backup/restore ─────────────────────────────────────────────────────

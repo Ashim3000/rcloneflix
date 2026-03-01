@@ -16,17 +16,14 @@ export function GoogleSignInStep({ onNext, onSkip, isFirstStep }: Props) {
   const { setGoogleAccount, googleAccount } = useAppStore();
   const [state, setState] = useState<State>(googleAccount ? "done" : "idle");
   const [error, setError] = useState("");
-  const [clientId, setClientId] = useState("");
   const [restoredConfig, setRestoredConfig] = useState(false);
 
   useEffect(() => {
-    // Listen for OAuth callback from Rust
     let unlisten: (() => void) | undefined;
     listenOAuthCallback(async (code) => {
       setState("exchanging");
       try {
-        const storedClientId = sessionStorage.getItem("oauth_client_id") ?? clientId;
-        const result = await exchangeOAuthCode(code, storedClientId);
+        const result = await exchangeOAuthCode(code);
         setGoogleAccount({
           email: result.email,
           displayName: result.displayName,
@@ -35,7 +32,6 @@ export function GoogleSignInStep({ onNext, onSkip, isFirstStep }: Props) {
           expiresAt: result.expiresAt,
         });
 
-        // Try to restore config from Drive
         if (isFirstStep) {
           setState("restoring");
           try {
@@ -52,17 +48,13 @@ export function GoogleSignInStep({ onNext, onSkip, isFirstStep }: Props) {
     }).then((fn) => { unlisten = fn; });
 
     return () => { unlisten?.(); };
-  }, [clientId]);
+  }, []);
 
   const handleSignIn = async () => {
-    if (!clientId.trim()) {
-      setError("Please enter your Google OAuth Client ID first.");
-      return;
-    }
     setError("");
     setState("waiting");
     try {
-      await startGoogleSignIn(clientId.trim());
+      await startGoogleSignIn();
     } catch (e) {
       setError(String(e));
       setState("error");
@@ -109,28 +101,6 @@ export function GoogleSignInStep({ onNext, onSkip, isFirstStep }: Props) {
         </motion.div>
       ) : (
         <div className="w-full space-y-3">
-          <div>
-            <label className="text-subtle font-body text-xs block mb-1.5 text-left">
-              Google OAuth Client ID
-              <a
-                href="https://console.cloud.google.com"
-                target="_blank"
-                rel="noreferrer"
-                className="text-accent ml-2 hover:underline"
-              >
-                Get one free →
-              </a>
-            </label>
-            <input
-              type="text"
-              value={clientId}
-              onChange={(e) => setClientId(e.target.value)}
-              placeholder="xxxxx.apps.googleusercontent.com"
-              className="input-field text-sm"
-              disabled={state === "waiting" || state === "exchanging" || state === "restoring"}
-            />
-          </div>
-
           {error && (
             <div className="flex items-center gap-2 text-danger text-xs font-body bg-danger/10 rounded-lg px-3 py-2">
               <AlertCircle size={13} />
