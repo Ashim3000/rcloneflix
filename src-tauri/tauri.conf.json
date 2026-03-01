@@ -41,7 +41,7 @@
     ],
     "linux": {
       "deb": {
-        "depends": ["libwebkit2gtk-4.1-0", "rclone", "libvlc5"]
+        "depends": ["libwebkit2gtk-4.1-0", "rclone", "libvlc5", "vlc-plugin-base"]
       },
       "appimage": {
         "bundleMediaFramework": true

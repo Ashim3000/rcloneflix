@@ -12,6 +12,17 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
         .setup(|app| {
+            // Point VLC at bundled plugins when running from an AppImage/deb package.
+            // On a plain install the system path is fine; this only overrides when the
+            // bundled directory actually exists (i.e. we shipped it).
+            #[cfg(target_os = "linux")]
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                let bundled_plugins = resource_dir.join("vlc/plugins");
+                if bundled_plugins.exists() {
+                    std::env::set_var("VLC_PLUGIN_PATH", bundled_plugins);
+                }
+            }
+
             let vlc = VlcManager::new(app.handle().clone());
             app.manage(vlc);
             Ok(())

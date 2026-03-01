@@ -31,6 +31,7 @@ jobs:
             imagemagick \
             libvlc-dev \
             libvlccore-dev \
+            vlc-plugin-base \
             libfuse2
 
       # ── 3. Install rclone into resources folder ────────────────────────────
@@ -42,6 +43,19 @@ jobs:
           cp /tmp/rclone-tmp/rclone-*/rclone src-tauri/resources/rclone
           chmod +x src-tauri/resources/rclone
           echo "rclone version: $(src-tauri/resources/rclone version)"
+
+      # ── 3b. Bundle VLC codec plugins ───────────────────────────────────────
+      # linuxdeploy auto-bundles libvlc.so.5 (linked) but NOT the codec plugins
+      # (dlopen'd at runtime). We copy them into resources so AppImage works
+      # without a system VLC install. VLC_PLUGIN_PATH is set at app startup.
+      - name: Bundle VLC plugins
+        run: |
+          VLC_PLUGIN_SRC=$(find /usr/lib -maxdepth 3 -type d -name "plugins" \
+            | grep -i vlc | head -1)
+          echo "Copying VLC plugins from: $VLC_PLUGIN_SRC"
+          mkdir -p src-tauri/resources/vlc/plugins
+          cp -r "$VLC_PLUGIN_SRC"/. src-tauri/resources/vlc/plugins/
+          echo "Plugin count: $(find src-tauri/resources/vlc/plugins -name '*.so' | wc -l)"
 
       # ── 4. Install Rust ────────────────────────────────────────────────────
       - name: Install Rust
@@ -77,12 +91,15 @@ jobs:
           npx tauri icon /tmp/icon.png
 
       # ── 9. Add resources back to tauri.conf.json ──────────────────────────
-      - name: Patch tauri.conf.json to include rclone resource
+      - name: Patch tauri.conf.json to include bundled resources
         run: |
           node -e "
             const fs = require('fs');
             const conf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
-            conf.bundle.resources = { 'resources/rclone': 'rclone' };
+            conf.bundle.resources = {
+              'resources/rclone': 'rclone',
+              'resources/vlc/plugins/**': 'vlc/plugins'
+            };
             fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2));
           "
 
