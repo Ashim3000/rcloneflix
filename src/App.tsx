@@ -1,5 +1,7 @@
+import { useEffect, useRef } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { useAppStore } from "./store/appStore";
+import { scanAllLibraries } from "./lib/scanner";
 import { SetupPage } from "./pages/SetupPage";
 import { AppShell } from "./components/layout/AppShell";
 import { HomePage } from "./pages/HomePage";
@@ -15,6 +17,17 @@ import { PdfReaderPage } from "./pages/player/PdfReaderPage";
 
 export default function App() {
   const { setupComplete } = useAppStore();
+
+  // Run a background scan on every launch once setup is complete.
+  // The scanner only picks up new/removed files since it passes knownPaths
+  // to rclone, so repeated launches are cheap.
+  const hasAutoScanned = useRef(false);
+  useEffect(() => {
+    if (setupComplete && !hasAutoScanned.current) {
+      hasAutoScanned.current = true;
+      scanAllLibraries().catch(() => {});
+    }
+  }, [setupComplete]);
 
   return (
     <Routes>

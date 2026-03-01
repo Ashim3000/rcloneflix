@@ -9,7 +9,7 @@ import { useAppStore, type Library, type LibraryType } from "../store/appStore";
 import { hashPin, verifyPin } from "../lib/pin";
 import { ScanBar } from "../components/common/ScanBar";
 import { scanAllLibraries } from "../lib/scanner";
-import { backupToDrive, restoreFromDrive, startGoogleSignIn } from "../lib/sync";
+import { backupToDrive, restoreFromDrive, startGoogleSignIn, exchangeOAuthCode, listenOAuthCallback } from "../lib/sync";
 import { RemoteBrowser } from "../components/common/RemoteBrowser";
 
 type Section = "api-keys" | "libraries" | "adult" | "sync" | "scan";
@@ -50,11 +50,37 @@ export function SettingsPage() {
 
   // Library edit state
   const [editingLib, setEditingLib] = useState<Library | null>(null);
-  const [newLib, setNewLib] = useState<{ name: string; type: LibraryType; remotePath: string } | null>(null);
-  const [showBrowserFor, setShowBrowserFor] = useState<"edit" | "new" | null>(null);
+  const [newLib, setNewLib] = useState<{ name: string; type: LibraryType; remotePaths: string[] } | null>(null);
+  // Which path row is currently being browsed: { mode, pathIndex }
+  const [showBrowserFor, setShowBrowserFor] = useState<{ mode: "edit" | "new"; pathIndex: number } | null>(null);
 
   // Sync state
   const [syncMsg, setSyncMsg] = useState("");
+  const [oauthState, setOauthState] = useState<"idle" | "waiting" | "exchanging" | "error">("idle");
+  const [oauthError, setOauthError] = useState("");
+
+  // Listen for OAuth callback from the Rust local server whenever in sync section
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listenOAuthCallback(async (code) => {
+      setOauthState("exchanging");
+      try {
+        const result = await exchangeOAuthCode(code);
+        setGoogleAccount({
+          email: result.email,
+          displayName: result.displayName,
+          accessToken: result.accessToken,
+          refreshToken: result.refreshToken,
+          expiresAt: result.expiresAt,
+        });
+        setOauthState("idle");
+      } catch (e) {
+        setOauthError(String(e));
+        setOauthState("error");
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, []);
 
   const handleSaveKeys = () => {
     setSavedKeys(true);
@@ -80,13 +106,13 @@ export function SettingsPage() {
   const handleAddLibrary = () => {
     if (!newLib) return;
     const id = `lib-${Date.now()}`;
-    addLibrary({ id, ...newLib });
+    addLibrary({ id, name: newLib.name, type: newLib.type, remotePaths: newLib.remotePaths.filter(Boolean) });
     setNewLib(null);
   };
 
   const handleSaveLibEdit = () => {
     if (!editingLib) return;
-    updateLibrary(editingLib.id, { name: editingLib.name, type: editingLib.type, remotePath: editingLib.remotePath });
+    updateLibrary(editingLib.id, { name: editingLib.name, type: editingLib.type, remotePaths: editingLib.remotePaths.filter(Boolean) });
     setEditingLib(null);
   };
 
@@ -110,6 +136,19 @@ export function SettingsPage() {
 
   const handleSignOut = () => {
     setGoogleAccount(null);
+    setOauthState("idle");
+    setOauthError("");
+  };
+
+  const handleGoogleSignIn = async () => {
+    setOauthError("");
+    setOauthState("waiting");
+    try {
+      await startGoogleSignIn();
+    } catch (e) {
+      setOauthError(String(e));
+      setOauthState("error");
+    }
   };
 
   const SECTIONS: { id: Section; label: string }[] = [
@@ -190,7 +229,7 @@ export function SettingsPage() {
               <motion.div key="libs" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
                 <div className="flex items-center justify-between mb-6">
                   <h2 className="font-display text-3xl text-bright tracking-wide">LIBRARIES</h2>
-                  <button onClick={() => setNewLib({ name: "", type: "movies", remotePath: "" })}
+                  <button onClick={() => setNewLib({ name: "", type: "movies", remotePaths: [""] })}
                     className="btn-secondary flex items-center gap-2 text-sm py-2">
                     <Plus size={14} /> Add Library
                   </button>
@@ -212,35 +251,50 @@ export function SettingsPage() {
                         className="input-field text-sm">
                         {LIBRARY_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
                       </select>
-                      <div className="flex items-center gap-2">
-                        <select
-                          value={newLib.remotePath.split(":")[0] ?? ""}
-                          onChange={(e) => setNewLib({ ...newLib, remotePath: e.target.value ? `${e.target.value}:` : "" })}
-                          className="input-field text-sm flex-shrink-0 w-40"
-                        >
-                          <option value="">Remote…</option>
-                          {remotes.map((r) => (
-                            <option key={r.name} value={r.name}>{r.name} ({r.type})</option>
-                          ))}
-                        </select>
-                        <div className="flex-1 flex items-center gap-2 bg-panel border border-border rounded-lg px-3 py-2 min-w-0">
-                          <span className="font-mono text-xs text-text flex-1 truncate">
-                            {newLib.remotePath
-                              ? (newLib.remotePath.split(":")[1] || <span className="text-subtle italic">/ root</span>)
-                              : <span className="text-subtle italic">select a remote first</span>}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => setShowBrowserFor("new")}
-                            disabled={!newLib.remotePath}
-                            className="text-accent hover:text-accent-glow text-xs font-body font-semibold transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
+                      <p className="text-subtle font-body text-xs">Folders</p>
+                      {newLib.remotePaths.map((path, i) => (
+                        <div key={i} className="flex items-center gap-2">
+                          <select
+                            value={path.split(":")[0] ?? ""}
+                            onChange={(e) => {
+                              const updated = [...newLib.remotePaths];
+                              updated[i] = e.target.value ? `${e.target.value}:` : "";
+                              setNewLib({ ...newLib, remotePaths: updated });
+                            }}
+                            className="input-field text-sm flex-shrink-0 w-36"
                           >
-                            Browse
-                          </button>
+                            <option value="">Remote…</option>
+                            {remotes.map((r) => (
+                              <option key={r.name} value={r.name}>{r.name} ({r.type})</option>
+                            ))}
+                          </select>
+                          <div className="flex-1 flex items-center gap-2 bg-surface border border-border rounded-lg px-3 py-1.5 min-w-0">
+                            <span className="font-mono text-xs text-text flex-1 truncate">
+                              {path ? (path.split(":")[1] || <span className="text-subtle italic">/ root</span>) : <span className="text-subtle italic">select remote</span>}
+                            </span>
+                            <button type="button"
+                              onClick={() => setShowBrowserFor({ mode: "new", pathIndex: i })}
+                              disabled={!path}
+                              className="text-accent text-xs font-body font-semibold transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0">
+                              Browse
+                            </button>
+                          </div>
+                          {newLib.remotePaths.length > 1 && (
+                            <button type="button" onClick={() => setNewLib({ ...newLib, remotePaths: newLib.remotePaths.filter((_, j) => j !== i) })}
+                              className="text-subtle hover:text-danger transition-colors">
+                              <X size={14} />
+                            </button>
+                          )}
                         </div>
-                      </div>
+                      ))}
+                      <button type="button"
+                        onClick={() => setNewLib({ ...newLib, remotePaths: [...newLib.remotePaths, ""] })}
+                        className="flex items-center gap-1 text-accent text-xs font-body hover:underline">
+                        <Plus size={12} /> Add Folder
+                      </button>
                       <div className="flex gap-2">
-                        <button onClick={handleAddLibrary} disabled={!newLib.name || !newLib.remotePath}
+                        <button onClick={handleAddLibrary}
+                          disabled={!newLib.name || newLib.remotePaths.every(p => !p)}
                           className="btn-primary text-sm py-2 disabled:opacity-50">Add</button>
                         <button onClick={() => setNewLib(null)} className="btn-secondary text-sm py-2">Cancel</button>
                       </div>
@@ -256,31 +310,48 @@ export function SettingsPage() {
                           <input value={editingLib.name}
                             onChange={(e) => setEditingLib({ ...editingLib, name: e.target.value })}
                             className="input-field text-sm" />
-                          <div className="flex items-center gap-2">
-                            <select
-                              value={editingLib.remotePath.split(":")[0] ?? ""}
-                              onChange={(e) => setEditingLib({ ...editingLib, remotePath: e.target.value ? `${e.target.value}:` : "" })}
-                              className="input-field text-sm flex-shrink-0 w-40"
-                            >
-                              <option value="">Remote…</option>
-                              {remotes.map((r) => (
-                                <option key={r.name} value={r.name}>{r.name} ({r.type})</option>
-                              ))}
-                            </select>
-                            <div className="flex-1 flex items-center gap-2 bg-panel border border-border rounded-lg px-3 py-2 min-w-0">
-                              <span className="font-mono text-xs text-text flex-1 truncate">
-                                {editingLib.remotePath.split(":")[1] || <span className="text-subtle italic">/ root</span>}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => setShowBrowserFor("edit")}
-                                disabled={!editingLib.remotePath}
-                                className="text-accent hover:text-accent-glow text-xs font-body font-semibold transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
+                          <p className="text-subtle font-body text-xs">Folders</p>
+                          {editingLib.remotePaths.map((path, i) => (
+                            <div key={i} className="flex items-center gap-2">
+                              <select
+                                value={path.split(":")[0] ?? ""}
+                                onChange={(e) => {
+                                  const updated = [...editingLib.remotePaths];
+                                  updated[i] = e.target.value ? `${e.target.value}:` : "";
+                                  setEditingLib({ ...editingLib, remotePaths: updated });
+                                }}
+                                className="input-field text-sm flex-shrink-0 w-36"
                               >
-                                Browse
-                              </button>
+                                <option value="">Remote…</option>
+                                {remotes.map((r) => (
+                                  <option key={r.name} value={r.name}>{r.name} ({r.type})</option>
+                                ))}
+                              </select>
+                              <div className="flex-1 flex items-center gap-2 bg-surface border border-border rounded-lg px-3 py-1.5 min-w-0">
+                                <span className="font-mono text-xs text-text flex-1 truncate">
+                                  {path ? (path.split(":")[1] || <span className="text-subtle italic">/ root</span>) : <span className="text-subtle italic">select remote</span>}
+                                </span>
+                                <button type="button"
+                                  onClick={() => setShowBrowserFor({ mode: "edit", pathIndex: i })}
+                                  disabled={!path}
+                                  className="text-accent text-xs font-body font-semibold transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0">
+                                  Browse
+                                </button>
+                              </div>
+                              {editingLib.remotePaths.length > 1 && (
+                                <button type="button"
+                                  onClick={() => setEditingLib({ ...editingLib, remotePaths: editingLib.remotePaths.filter((_, j) => j !== i) })}
+                                  className="text-subtle hover:text-danger transition-colors">
+                                  <X size={14} />
+                                </button>
+                              )}
                             </div>
-                          </div>
+                          ))}
+                          <button type="button"
+                            onClick={() => setEditingLib({ ...editingLib, remotePaths: [...editingLib.remotePaths, ""] })}
+                            className="flex items-center gap-1 text-accent text-xs font-body hover:underline">
+                            <Plus size={12} /> Add Folder
+                          </button>
                           <div className="flex gap-2">
                             <button onClick={handleSaveLibEdit} className="btn-primary text-sm py-2">Save</button>
                             <button onClick={() => setEditingLib(null)} className="btn-secondary text-sm py-2">Cancel</button>
@@ -288,12 +359,16 @@ export function SettingsPage() {
                         </div>
                       ) : (
                         <div className="flex items-center justify-between">
-                          <div>
+                          <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2 mb-1">
                               <span className="text-text font-body font-semibold text-sm">{lib.name}</span>
                               <span className="text-subtle font-mono text-xs bg-muted px-2 py-0.5 rounded">{lib.type}</span>
                             </div>
-                            <p className="text-subtle font-mono text-xs truncate max-w-sm">{lib.remotePath}</p>
+                            {lib.remotePaths.length === 1 ? (
+                              <p className="text-subtle font-mono text-xs truncate max-w-sm">{lib.remotePaths[0]}</p>
+                            ) : (
+                              <p className="text-subtle font-body text-xs">{lib.remotePaths.length} folders</p>
+                            )}
                           </div>
                           <div className="flex gap-2 ml-4">
                             <button onClick={() => setEditingLib(lib)}
@@ -314,36 +389,36 @@ export function SettingsPage() {
                   )}
                 </div>
 
-                {/* Path browser for editing an existing library */}
-                {showBrowserFor === "edit" && editingLib && (() => {
-                  const remoteName = editingLib.remotePath.split(":")[0];
+                {/* Path browser — shared for edit and new */}
+                {showBrowserFor && (() => {
+                  const { mode, pathIndex } = showBrowserFor;
+                  const currentPath = mode === "edit"
+                    ? editingLib?.remotePaths[pathIndex] ?? ""
+                    : newLib?.remotePaths[pathIndex] ?? "";
+                  const remoteName = currentPath.split(":")[0];
                   const remote = remotes.find((r) => r.name === remoteName);
-                  return remote ? (
+                  if (!remote) return null;
+                  return (
                     <RemoteBrowser
                       remoteName={remote.name}
                       remoteType={remote.type}
                       rcloneConfigPath={rcloneConfigPath}
-                      initialPath={editingLib.remotePath}
-                      onSelect={(path) => { setEditingLib({ ...editingLib, remotePath: path }); setShowBrowserFor(null); }}
+                      initialPath={currentPath}
+                      onSelect={(path) => {
+                        if (mode === "edit" && editingLib) {
+                          const updated = [...editingLib.remotePaths];
+                          updated[pathIndex] = path;
+                          setEditingLib({ ...editingLib, remotePaths: updated });
+                        } else if (mode === "new" && newLib) {
+                          const updated = [...newLib.remotePaths];
+                          updated[pathIndex] = path;
+                          setNewLib({ ...newLib, remotePaths: updated });
+                        }
+                        setShowBrowserFor(null);
+                      }}
                       onClose={() => setShowBrowserFor(null)}
                     />
-                  ) : null;
-                })()}
-
-                {/* Path browser for adding a new library */}
-                {showBrowserFor === "new" && newLib && (() => {
-                  const remoteName = newLib.remotePath.split(":")[0];
-                  const remote = remotes.find((r) => r.name === remoteName);
-                  return remote ? (
-                    <RemoteBrowser
-                      remoteName={remote.name}
-                      remoteType={remote.type}
-                      rcloneConfigPath={rcloneConfigPath}
-                      initialPath={newLib.remotePath}
-                      onSelect={(path) => { setNewLib({ ...newLib, remotePath: path }); setShowBrowserFor(null); }}
-                      onClose={() => setShowBrowserFor(null)}
-                    />
-                  ) : null;
+                  );
                 })()}
               </motion.div>
             )}
@@ -366,9 +441,11 @@ export function SettingsPage() {
 
                   {libraries.map((lib) => (
                     <div key={lib.id} className="bg-panel border border-border rounded-xl p-4 flex items-center justify-between">
-                      <div>
+                      <div className="min-w-0 flex-1">
                         <p className="text-text font-body text-sm font-medium">{lib.name}</p>
-                        <p className="text-subtle font-mono text-xs">{lib.remotePath}</p>
+                        <p className="text-subtle font-mono text-xs truncate">
+                          {lib.remotePaths.length === 1 ? lib.remotePaths[0] : `${lib.remotePaths.length} folders`}
+                        </p>
                       </div>
                       <ScanBar libraryId={lib.id} compact />
                     </div>
@@ -505,9 +582,28 @@ export function SettingsPage() {
                     <p className="text-subtle font-body text-sm">
                       Sign in with Google to enable encrypted config backup and cross-device sync.
                     </p>
+                    {oauthError && (
+                      <div className="flex items-center gap-2 text-danger text-xs font-body bg-danger/10 rounded-lg px-3 py-2">
+                        <AlertCircle size={13} />
+                        {oauthError}
+                      </div>
+                    )}
+                    {oauthState === "waiting" && (
+                      <div className="flex items-center gap-2 text-accent text-xs font-body bg-accent/10 rounded-lg px-3 py-2">
+                        <RefreshCw size={13} className="animate-spin" />
+                        Browser opened — complete sign-in then return here
+                      </div>
+                    )}
+                    {oauthState === "exchanging" && (
+                      <div className="flex items-center gap-2 text-accent text-xs font-body">
+                        <RefreshCw size={13} className="animate-spin" />
+                        Signing in…
+                      </div>
+                    )}
                     <button
-                      onClick={() => startGoogleSignIn()}
-                      className="btn-primary flex items-center gap-2">
+                      onClick={handleGoogleSignIn}
+                      disabled={oauthState === "waiting" || oauthState === "exchanging"}
+                      className="btn-primary flex items-center gap-2 disabled:opacity-50">
                       <Chrome size={16} />
                       Sign in with Google
                     </button>

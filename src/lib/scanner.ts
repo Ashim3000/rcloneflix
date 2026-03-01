@@ -147,10 +147,19 @@ async function fetchMusicBrainz(title: string): Promise<Partial<MediaItem>> {
     if (!r) return {};
 
     const release = r.releases?.[0];
-    // Cover Art Archive: returns the front cover image for the release (follows redirect)
-    const posterUrl = release?.id
-      ? `https://coverartarchive.org/release/${release.id}/front`
-      : undefined;
+    // Cover Art Archive: fetch the JSON API to get a direct (non-redirect) thumbnail URL
+    let posterUrl: string | undefined;
+    if (release?.id) {
+      try {
+        const caaResp = await fetch(`https://coverartarchive.org/release/${release.id}`);
+        if (caaResp.ok) {
+          const caaData = await caaResp.json();
+          posterUrl = caaData.images?.[0]?.thumbnails?.["250"]
+            ?? caaData.images?.[0]?.thumbnails?.small
+            ?? caaData.images?.[0]?.image;
+        }
+      } catch { /* no cover art */ }
+    }
 
     return {
       title: r.title ?? title,
@@ -203,24 +212,32 @@ export async function scanLibrary(library: Library, apiKeys: { tmdb: string; the
   setScanState({ status: "scanning", currentLibrary: library.name, progress: 0, newItemsFound: 0 });
 
   try {
-    const result: LibraryScanResult = await invoke("scan_library_files", {
-      configPath: rcloneConfigPath,
-      remotePath: library.remotePath,
-      libraryId: library.id,
-      knownPaths,
-    });
+    // Scan each folder in the library and merge results
+    const allNewFiles: LibraryScanResult["new_files"] = [];
+    const allRemovedPaths: string[] = [];
+
+    for (const remotePath of library.remotePaths) {
+      const result: LibraryScanResult = await invoke("scan_library_files", {
+        configPath: rcloneConfigPath,
+        remotePath,
+        libraryId: library.id,
+        knownPaths,
+      });
+      allNewFiles.push(...result.new_files);
+      allRemovedPaths.push(...result.removed_paths);
+    }
 
     // Remove deleted files
-    for (const removedPath of result.removed_paths) {
+    for (const removedPath of allRemovedPaths) {
       const item = Object.values(mediaItems).find((i) => i.remotePath === removedPath);
       if (item) removeMediaItem(item.id);
     }
 
-    const total = result.new_files.length;
+    const total = allNewFiles.length;
     const newItems: MediaItem[] = [];
 
-    for (let idx = 0; idx < result.new_files.length; idx++) {
-      const file = result.new_files[idx];
+    for (let idx = 0; idx < allNewFiles.length; idx++) {
+      const file = allNewFiles[idx];
 
       setScanState({ progress: Math.round((idx / Math.max(total, 1)) * 100), newItemsFound: idx });
 

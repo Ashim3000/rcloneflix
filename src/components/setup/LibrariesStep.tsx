@@ -45,13 +45,16 @@ function LibraryRow({
 
   const meta = LIBRARY_TYPES.find((t) => t.type === lib.type)!;
 
-  const colonIdx = lib.remotePath.indexOf(":");
-  const currentRemoteName = colonIdx >= 0 ? lib.remotePath.slice(0, colonIdx) : "";
-  const subPath = colonIdx >= 0 ? lib.remotePath.slice(colonIdx + 1) : "";
+  // LibrariesStep shows/edits only the first path for simplicity;
+  // additional paths can be added in Settings after setup
+  const firstPath = lib.remotePaths?.[0] ?? "";
+  const colonIdx = firstPath.indexOf(":");
+  const currentRemoteName = colonIdx >= 0 ? firstPath.slice(0, colonIdx) : "";
+  const subPath = colonIdx >= 0 ? firstPath.slice(colonIdx + 1) : "";
   const currentRemote = remotes.find((r) => r.name === currentRemoteName);
 
   const handleRemoteChange = (name: string) => {
-    onUpdate({ remotePath: name ? `${name}:` : "" });
+    onUpdate({ remotePaths: [name ? `${name}:` : ""] });
   };
 
   return (
@@ -114,6 +117,11 @@ function LibraryRow({
             >
               Browse
             </button>
+            {(lib.remotePaths?.length ?? 0) > 1 && (
+              <span className="text-subtle font-body text-xs flex-shrink-0">
+                +{lib.remotePaths.length - 1} more
+              </span>
+            )}
           </div>
         </div>
       </motion.div>
@@ -123,9 +131,11 @@ function LibraryRow({
           remoteName={currentRemote.name}
           remoteType={currentRemote.type}
           rcloneConfigPath={rcloneConfigPath}
-          initialPath={lib.remotePath}
+          initialPath={firstPath}
           onSelect={(path) => {
-            onUpdate({ remotePath: path });
+            const newPaths = [...(lib.remotePaths ?? [])];
+            newPaths[0] = path;
+            onUpdate({ remotePaths: newPaths });
             setShowBrowser(false);
           }}
           onClose={() => setShowBrowser(false)}
@@ -146,7 +156,7 @@ export function LibrariesStep({ onNext, onBack }: Props) {
       id: crypto.randomUUID(),
       name: meta.label,
       type,
-      remotePath: remotes[0] ? remotes[0].name + ":" : "",
+      remotePaths: [remotes[0] ? remotes[0].name + ":" : ""],
     });
     setShowTypeMenu(false);
   };

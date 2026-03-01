@@ -59,7 +59,11 @@ export function VideoPlayerPage() {
       return;
     }
 
-    const libRoot = library.remotePath.replace(/\/$/, "");
+    // Find which library folder contains this item (supports multi-folder libraries)
+    const matchingRoot = library.remotePaths.find((p) =>
+      item.remotePath.startsWith(p.replace(/\/$/, "") + "/")
+    ) ?? library.remotePaths[0];
+    const libRoot = matchingRoot.replace(/\/$/, "");
     const relPath = item.remotePath.startsWith(libRoot + "/")
       ? item.remotePath.slice(libRoot.length + 1)
       : item.remotePath.split("/").pop() ?? item.filename;
@@ -69,7 +73,7 @@ export function VideoPlayerPage() {
 
     invoke("open_media", {
       configPath: rcloneConfigPath,
-      remoteRoot: library.remotePath,
+      remoteRoot: matchingRoot,
       filePath: relPath,
       startMs,
     })

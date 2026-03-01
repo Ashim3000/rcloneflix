@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ArrowLeft, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Loader2 } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import type { MediaItem } from "../../store/appStore";
 import { useAppStore } from "../../store/appStore";
 import * as pdfjsLib from "pdfjs-dist";
@@ -44,7 +44,7 @@ export function PdfReaderPage() {
       remotePath: item.remotePath,
       sessionId: sessionId.current,
     })
-      .then((localUrl) => { setStreamUrl(localUrl); setDownloading(false); })
+      .then((localPath) => { setStreamUrl(convertFileSrc(localPath)); setDownloading(false); })
       .catch((e) => { setError(String(e)); setDownloading(false); });
 
     return () => {

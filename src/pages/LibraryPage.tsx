@@ -78,7 +78,11 @@ export function LibraryPage({ libraryType }: Props) {
             <h1 className="font-display text-5xl text-bright tracking-wide">{displayName.toUpperCase()}</h1>
             <p className="text-subtle font-body text-sm mt-1">
               {allItems.length} {allItems.length === 1 ? "item" : "items"}
-              {library && <span className="ml-2 font-mono text-xs">· {library.remotePath}</span>}
+              {library && (
+                <span className="ml-2 font-mono text-xs">
+                  · {library.remotePaths.length === 1 ? library.remotePaths[0] : `${library.remotePaths.length} folders`}
+                </span>
+              )}
             </p>
           </div>
           {library && (

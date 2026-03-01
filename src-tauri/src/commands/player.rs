@@ -597,7 +597,7 @@ pub async fn download_book_to_temp(
     let (remote_name, sub_path) = parse_remote_root(&remote_path);
     let sub_path = sub_path.trim_start_matches('/');
     if let Some(local_path) = find_fuse_local_path(remote_name, sub_path) {
-        return Ok(format!("file://{}", local_path.to_string_lossy()));
+        return Ok(local_path.to_string_lossy().into_owned());
     }
 
     // 2. Download via rclone copyto
@@ -632,7 +632,7 @@ pub async fn download_book_to_temp(
         return Err(format!("rclone copyto error: {}", stderr));
     }
 
-    Ok(format!("file://{}", local_path.to_string_lossy()))
+    Ok(local_path.to_string_lossy().into_owned())
 }
 
 /// Delete the temp directory created by `download_book_to_temp` for this session.

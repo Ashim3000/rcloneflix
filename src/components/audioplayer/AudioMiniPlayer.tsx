@@ -4,7 +4,7 @@ import {
   Play, Pause, SkipBack, SkipForward, Volume2, VolumeX,
   ChevronDown, Music, Loader2,
 } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { useAppStore, type MediaItem } from "../../store/appStore";
 
 type Props = {
@@ -36,11 +36,12 @@ export function AudioMiniPlayer({ playlist, playlistIndex: initialIndex, onClose
     async (track: MediaItem): Promise<string> => {
       const cached = cachedUrls.current.get(track.id);
       if (cached) return cached;
-      const url = await invoke<string>("download_book_to_temp", {
+      const localPath = await invoke<string>("download_book_to_temp", {
         configPath: rcloneConfigPath,
         remotePath: track.remotePath,
         sessionId: `audio-${track.id}`,
       });
+      const url = convertFileSrc(localPath);
       cachedUrls.current.set(track.id, url);
       return url;
     },

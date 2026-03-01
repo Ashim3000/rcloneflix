@@ -7,7 +7,7 @@ export type Library = {
   id: string;
   name: string;
   type: LibraryType;
-  remotePath: string;
+  remotePaths: string[];  // one or more remote paths for this library
 };
 
 export type RcloneRemote = {
@@ -275,6 +275,20 @@ export const useAppStore = create<AppStore>()(
     }),
     {
       name: "rcloneflix-config",
+      version: 2,
+      migrate: (persistedState: unknown, fromVersion: number) => {
+        const state = persistedState as Record<string, unknown>;
+        if (fromVersion < 2) {
+          // Migrate Library.remotePath → Library.remotePaths
+          const libs = (state.libraries ?? []) as Array<Record<string, unknown>>;
+          state.libraries = libs.map((lib) => ({
+            ...lib,
+            remotePaths: (lib.remotePaths as string[] | undefined) ??
+              (lib.remotePath ? [lib.remotePath as string] : []),
+          }));
+        }
+        return state;
+      },
       partialize: (s) => ({
         ...s,
         adultSettings: { ...s.adultSettings, unlocked: false },
