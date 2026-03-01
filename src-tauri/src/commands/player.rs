@@ -381,6 +381,8 @@ pub async fn open_media(
                 &format!("127.0.0.1:{}", port),
                 "--read-only",
                 "--no-checksum",
+                "--allow-origin",
+                "*",
                 &remote_root,
             ])
             .spawn()
@@ -492,6 +494,7 @@ pub async fn start_stream_session(
             "--addr", &format!("127.0.0.1:{}", port),
             "--read-only",
             "--no-checksum",
+            "--allow-origin", "*",
             &remote_root,
         ])
         .spawn()
