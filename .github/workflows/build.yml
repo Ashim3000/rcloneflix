@@ -92,6 +92,8 @@ jobs:
           # Allows linuxdeploy/appimagetool (AppImages themselves) to run
           # without FUSE by extracting themselves into a temp directory.
           APPIMAGE_EXTRACT_AND_RUN: 1
+          VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
+          VITE_GOOGLE_CLIENT_SECRET: ${{ secrets.VITE_GOOGLE_CLIENT_SECRET }}
         run: npm run tauri build
 
       # ── 11. Upload .deb as artifact ────────────────────────────────────────

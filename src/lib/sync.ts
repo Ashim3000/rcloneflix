@@ -17,7 +17,8 @@ import { useAppStore, type AppConfig, type MediaItem, type WatchProgress } from 
 // Create a "Desktop app" OAuth 2.0 credential at https://console.cloud.google.com
 // Enable: Google Drive API, Google People API (for userinfo).
 // No client secret is needed — desktop apps use PKCE only.
-const GOOGLE_CLIENT_ID = "307244172749-16akn833ai5besgs3pggasetmgj6ui6d.apps.googleusercontent.com";
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID as string;
+const GOOGLE_CLIENT_SECRET = import.meta.env.VITE_GOOGLE_CLIENT_SECRET as string;
 
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
@@ -127,6 +128,7 @@ export async function exchangeOAuthCode(code: string): Promise<{
     body: new URLSearchParams({
       code,
       client_id: GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
       redirect_uri: "http://localhost:9876/oauth/callback",
       code_verifier: verifier,
       grant_type: "authorization_code",
@@ -162,6 +164,7 @@ export async function refreshAccessToken(refreshToken: string): Promise<{
     body: new URLSearchParams({
       refresh_token: refreshToken,
       client_id: GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
       grant_type: "refresh_token",
     }),
   });
