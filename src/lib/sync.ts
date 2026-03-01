@@ -17,7 +17,7 @@ import { useAppStore, type AppConfig, type MediaItem, type WatchProgress } from 
 // Create a "Desktop app" OAuth 2.0 credential at https://console.cloud.google.com
 // Enable: Google Drive API, Google People API (for userinfo).
 // No client secret is needed — desktop apps use PKCE only.
-const GOOGLE_CLIENT_ID = "YOUR_CLIENT_ID.apps.googleusercontent.com";
+const GOOGLE_CLIENT_ID = "307244172749-16akn833ai5besgs3pggasetmgj6ui6d.apps.googleusercontent.com";
 
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";

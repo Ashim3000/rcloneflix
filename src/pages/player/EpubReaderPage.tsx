@@ -47,8 +47,10 @@ export function EpubReaderPage() {
     if (!library) return;
 
     const remoteRoot = library.remotePath;
-    const relPath = item.remotePath
-      .replace(remoteRoot.replace(/\/$/, "") + "/", "");
+    const libRoot = remoteRoot.replace(/\/$/, "");
+    const relPath = item.remotePath.startsWith(libRoot + "/")
+      ? item.remotePath.slice(libRoot.length + 1)
+      : item.remotePath.split("/").pop() ?? item.filename;
 
     invoke<{ file_url: string }>("start_stream_session", {
       configPath: rcloneConfigPath,

@@ -48,7 +48,10 @@ export function PdfReaderPage() {
     const library = libraries.find((l) => l.id === item.libraryId);
     if (!library) return;
 
-    const relPath = item.remotePath.replace(library.remotePath.replace(/\/$/, "") + "/", "");
+    const libRoot = library.remotePath.replace(/\/$/, "");
+    const relPath = item.remotePath.startsWith(libRoot + "/")
+      ? item.remotePath.slice(libRoot.length + 1)
+      : item.remotePath.split("/").pop() ?? item.filename;
 
     invoke<{ file_url: string }>("start_stream_session", {
       configPath: rcloneConfigPath,

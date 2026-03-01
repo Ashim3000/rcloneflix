@@ -13,6 +13,7 @@ import {
   FolderOpen,
 } from "lucide-react";
 import { useAppStore, type Library } from "../../store/appStore";
+import { RemoteBrowser } from "../common/RemoteBrowser";
 
 type Props = {
   onNext: () => void;
@@ -39,72 +40,98 @@ function LibraryRow({
   onRemove: () => void;
   onUpdate: (updates: Partial<Library>) => void;
 }) {
+  const { rcloneConfigPath } = useAppStore();
+  const [showBrowser, setShowBrowser] = useState(false);
+
   const meta = LIBRARY_TYPES.find((t) => t.type === lib.type)!;
 
-  return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, height: 0 }}
-      animate={{ opacity: 1, height: "auto" }}
-      exit={{ opacity: 0, height: 0 }}
-      className="bg-panel border border-border rounded-xl p-4 overflow-hidden"
-    >
-      <div className="flex items-center gap-3 mb-3">
-        <div className="w-8 h-8 rounded-lg bg-surface flex items-center justify-center flex-shrink-0">
-          <meta.icon size={16} className={meta.color} />
-        </div>
-        <input
-          type="text"
-          value={lib.name}
-          onChange={(e) => onUpdate({ name: e.target.value })}
-          className="flex-1 bg-transparent text-bright font-body font-semibold text-sm outline-none border-b border-transparent focus:border-accent transition-colors"
-        />
-        <button
-          onClick={onRemove}
-          className="text-subtle hover:text-danger transition-colors p-1 rounded"
-        >
-          <Trash2 size={15} />
-        </button>
-      </div>
+  const colonIdx = lib.remotePath.indexOf(":");
+  const currentRemoteName = colonIdx >= 0 ? lib.remotePath.slice(0, colonIdx) : "";
+  const subPath = colonIdx >= 0 ? lib.remotePath.slice(colonIdx + 1) : "";
+  const currentRemote = remotes.find((r) => r.name === currentRemoteName);
 
-      <div className="flex items-center gap-2">
-        <FolderOpen size={14} className="text-subtle flex-shrink-0" />
-        <select
-          value={lib.remotePath.split("/")[0] + ":"}
-          onChange={(e) => {
-            const remote = e.target.value;
-            const sub = lib.remotePath.includes("/")
-              ? "/" + lib.remotePath.split("/").slice(1).join("/")
-              : "";
-            onUpdate({ remotePath: remote + sub });
+  const handleRemoteChange = (name: string) => {
+    onUpdate({ remotePath: name ? `${name}:` : "" });
+  };
+
+  return (
+    <>
+      <motion.div
+        layout
+        initial={{ opacity: 0, height: 0 }}
+        animate={{ opacity: 1, height: "auto" }}
+        exit={{ opacity: 0, height: 0 }}
+        className="bg-panel border border-border rounded-xl p-4 overflow-hidden"
+      >
+        {/* Name row */}
+        <div className="flex items-center gap-3 mb-3">
+          <div className="w-8 h-8 rounded-lg bg-surface flex items-center justify-center flex-shrink-0">
+            <meta.icon size={16} className={meta.color} />
+          </div>
+          <input
+            type="text"
+            value={lib.name}
+            onChange={(e) => onUpdate({ name: e.target.value })}
+            className="flex-1 bg-transparent text-bright font-body font-semibold text-sm outline-none border-b border-transparent focus:border-accent transition-colors"
+          />
+          <button
+            onClick={onRemove}
+            className="text-subtle hover:text-danger transition-colors p-1 rounded"
+          >
+            <Trash2 size={15} />
+          </button>
+        </div>
+
+        {/* Remote + path row */}
+        <div className="flex items-center gap-2">
+          <FolderOpen size={14} className="text-subtle flex-shrink-0" />
+          <select
+            value={currentRemoteName}
+            onChange={(e) => handleRemoteChange(e.target.value)}
+            className="bg-surface border border-border rounded-lg px-3 py-1.5 text-text text-xs font-body outline-none focus:border-accent transition-colors flex-shrink-0"
+          >
+            <option value="">Remote…</option>
+            {remotes.map((r) => (
+              <option key={r.name} value={r.name}>
+                {r.name} ({r.type})
+              </option>
+            ))}
+          </select>
+
+          {/* Path display + Browse */}
+          <div className="flex-1 flex items-center gap-2 bg-surface border border-border rounded-lg px-3 py-1.5 min-w-0">
+            <span className="font-mono text-xs flex-1 truncate min-w-0">
+              {currentRemoteName ? (
+                subPath || <span className="text-subtle italic">/ root</span>
+              ) : (
+                <span className="text-subtle italic">select a remote first</span>
+              )}
+            </span>
+            <button
+              onClick={() => setShowBrowser(true)}
+              disabled={!currentRemoteName}
+              className="text-accent hover:text-accent-glow text-xs font-body font-semibold transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
+            >
+              Browse
+            </button>
+          </div>
+        </div>
+      </motion.div>
+
+      {showBrowser && currentRemote && (
+        <RemoteBrowser
+          remoteName={currentRemote.name}
+          remoteType={currentRemote.type}
+          rcloneConfigPath={rcloneConfigPath}
+          initialPath={lib.remotePath}
+          onSelect={(path) => {
+            onUpdate({ remotePath: path });
+            setShowBrowser(false);
           }}
-          className="bg-surface border border-border rounded-lg px-3 py-1.5 text-text text-xs font-body outline-none focus:border-accent transition-colors"
-        >
-          <option value="">Select remote...</option>
-          {remotes.map((r) => (
-            <option key={r.name} value={r.name + ":"}>
-              {r.name}: ({r.type})
-            </option>
-          ))}
-        </select>
-        <input
-          type="text"
-          value={
-            lib.remotePath.includes("/")
-              ? lib.remotePath.split("/").slice(1).join("/")
-              : ""
-          }
-          onChange={(e) => {
-            const remote = lib.remotePath.split(":")[0] + ":";
-            onUpdate({
-              remotePath: remote + (e.target.value ? "/" + e.target.value : ""),
-            });
-          }}
-          placeholder="subfolder (optional)"
-          className="flex-1 bg-surface border border-border rounded-lg px-3 py-1.5 text-text placeholder-subtle text-xs font-body outline-none focus:border-accent transition-colors"
+          onClose={() => setShowBrowser(false)}
         />
-      </div>
-    </motion.div>
+      )}
+    </>
   );
 }
 
