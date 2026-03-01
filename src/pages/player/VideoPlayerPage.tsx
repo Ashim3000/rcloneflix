@@ -47,17 +47,6 @@ export function VideoPlayerPage() {
     buffering: true, showControls: true, error: null,
   });
 
-  // ── Transparent body so VLC renders through the WebView ─────────────────────
-
-  useEffect(() => {
-    document.body.style.background = "transparent";
-    document.documentElement.style.background = "transparent";
-    return () => {
-      document.body.style.background = "";
-      document.documentElement.style.background = "";
-    };
-  }, []);
-
   // ── Start playback ──────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -318,13 +307,10 @@ export function VideoPlayerPage() {
   return (
     <div
       ref={containerRef}
-      className="fixed inset-0 flex items-center justify-center select-none"
+      className="fixed inset-0 bg-black flex items-center justify-center select-none"
       onMouseMove={showControlsTemp}
       style={{ cursor: ps.showControls ? "default" : "none" }}
     >
-      {/* VLC renders into the native window behind this div.
-          Keep this area transparent so the video shows through. */}
-      <div className="absolute inset-0" style={{ background: "transparent" }} />
 
       {/* Loading */}
       {loading && (

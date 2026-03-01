@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -406,7 +406,9 @@ pub async fn open_media(
             *guard = Some(child);
         }
 
-        let encoded = percent_encode_path(&full_relative);
+        // rclone serve http uses remote_root as its root, so the URL path
+        // is just file_path (relative to remote_root), not full_relative.
+        let encoded = percent_encode_path(file_path.trim_start_matches('/'));
         format!("http://127.0.0.1:{}/{}", port, encoded)
     };
 
@@ -527,7 +529,9 @@ pub async fn start_stream_session(
         map.insert(session_id, child);
     }
 
-    let encoded = percent_encode_path(&full_relative);
+    // rclone serve http uses remote_root as its root, so the URL path
+    // is just file_path (relative to remote_root), not full_relative.
+    let encoded = percent_encode_path(file_path.trim_start_matches('/'));
     let file_url = format!("http://127.0.0.1:{}/{}", port, encoded);
     Ok(serde_json::json!({ "file_url": file_url }))
 }
