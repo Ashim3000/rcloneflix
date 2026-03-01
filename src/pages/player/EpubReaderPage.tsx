@@ -5,7 +5,27 @@ import { ChevronLeft, ChevronRight, ArrowLeft, Type, BookOpen } from "lucide-rea
 import { invoke } from "@tauri-apps/api/core";
 import type { MediaItem } from "../../store/appStore";
 import { useAppStore } from "../../store/appStore";
-import Epub from "epubjs";
+import * as EpubModule from "epubjs";
+
+// epubjs uses CJS `export =` without a default export; cast here so the rest
+// of the file stays type-safe without requiring esModuleInterop in tsconfig.
+interface EpubRendition {
+  display(cfi?: string): Promise<void>;
+  next(): Promise<void>;
+  prev(): Promise<void>;
+  on(event: string, cb: (...args: any[]) => void): void;
+  themes: {
+    fontSize(s: string): void;
+    select(name: string): void;
+    register(name: string, styles: Record<string, unknown>): void;
+  };
+  destroy(): void;
+}
+interface EpubBook {
+  renderTo(el: Element, options?: Record<string, unknown>): EpubRendition;
+  destroy(): void;
+}
+const Epub = EpubModule as unknown as (url: string) => EpubBook;
 
 type ReaderSettings = {
   fontSize: number;
@@ -19,7 +39,7 @@ export function EpubReaderPage() {
   const { rcloneConfigPath, libraries, updateWatchProgress, watchProgress } = useAppStore();
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const renditionRef = useRef<ReturnType<ReturnType<typeof ePub>["renderTo"]> | null>(null);
+  const renditionRef = useRef<EpubRendition | null>(null);
 
   const [settings, setSettings] = useState<ReaderSettings>({ fontSize: 16, theme: "dark" });
   const [showSettings, setShowSettings] = useState(false);

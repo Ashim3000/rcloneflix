@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Play, MoreVertical, Wrench, CheckCircle2, Clock } from "lucide-react";
 import { useNavigate } from "react-router-dom";
@@ -34,13 +34,17 @@ function ProgressBar({ progress }: { progress: WatchProgress }) {
   );
 }
 
-export function MediaCard({ item, progress, onPlay, onFixMatch, index = 0 }: Props) {
+export const MediaCard = memo(function MediaCard({ item, progress, onPlay, onFixMatch, index = 0 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [imgError, setImgError] = useState(false);
   const colorClass = PLACEHOLDER_COLORS[index % PLACEHOLDER_COLORS.length];
   const isLowConfidence = item.metadataConfidence === "low";
   const navigate = useNavigate();
-  const { rcloneConfigPath, libraries, watchProgress } = useAppStore();
+  // Scoped selectors so this card only re-renders when these specific
+  // values change — not on every unrelated store update (scan progress,
+  // other items' watch progress, adult unlock, etc.)
+  const rcloneConfigPath = useAppStore((s) => s.rcloneConfigPath);
+  const libraries = useAppStore((s) => s.libraries);
 
   // Determine play route based on file extension and library type
   const handlePlay = async (mediaItem: MediaItem) => {
@@ -50,8 +54,6 @@ export function MediaCard({ item, progress, onPlay, onFixMatch, index = 0 }: Pro
     const library = libraries.find((l) => l.id === mediaItem.libraryId);
     if (!library) return;
 
-    const existingProgress = watchProgress[mediaItem.id];
-
     if (ext === "epub") {
       navigate("/play/epub", { state: { item: mediaItem } });
     } else if (ext === "pdf") {
@@ -59,7 +61,10 @@ export function MediaCard({ item, progress, onPlay, onFixMatch, index = 0 }: Pro
     } else if (["mp3","flac","aac","ogg","m4a","wav","opus","m4b"].includes(ext)) {
       // Audio — start stream and pass to mini-player via outlet context
       try {
-        const relPath = mediaItem.remotePath.replace(library.remotePath.replace(/\/$/, "") + "/", "");
+        const libRoot = library.remotePath.replace(/\/$/, "");
+        const relPath = mediaItem.remotePath.startsWith(libRoot + "/")
+          ? mediaItem.remotePath.slice(libRoot.length + 1)
+          : mediaItem.remotePath.split("/").pop() ?? mediaItem.filename;
         const session = await invoke<{ file_url: string }>("start_stream_session", {
           configPath: rcloneConfigPath,
           remoteRoot: library.remotePath,
@@ -67,10 +72,9 @@ export function MediaCard({ item, progress, onPlay, onFixMatch, index = 0 }: Pro
           sessionId: `audio-${mediaItem.id}`,
         });
         // Dispatch to AppShell audio player
-        const event = new CustomEvent("rcloneflix:play-audio", {
+        window.dispatchEvent(new CustomEvent("rcloneflix:play-audio", {
           detail: { item: mediaItem, streamUrl: session.file_url }
-        });
-        window.dispatchEvent(event);
+        }));
       } catch (e) {
         console.error("Failed to start audio stream:", e);
       }
@@ -79,7 +83,7 @@ export function MediaCard({ item, progress, onPlay, onFixMatch, index = 0 }: Pro
       navigate("/play/video", {
         state: {
           item: mediaItem,
-          resumeAt: existingProgress?.position,
+          resumeAt: progress?.position,
         }
       });
     }
@@ -213,7 +217,7 @@ export function MediaCard({ item, progress, onPlay, onFixMatch, index = 0 }: Pro
       </div>
     </motion.div>
   );
-}
+});
 
 function formatTime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
