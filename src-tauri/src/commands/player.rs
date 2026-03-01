@@ -75,9 +75,16 @@ fn vlc_thread(rx: mpsc::Receiver<VlcCmd>, app: AppHandle) {
     let instance = match vlc::Instance::new() {
         Some(i) => i,
         None => {
+            let plugin_path = std::env::var("VLC_PLUGIN_PATH")
+                .unwrap_or_else(|_| "<not set>".into());
             let _ = app.emit(
                 "vlc:error",
-                serde_json::json!({ "message": "Failed to initialize libvlc. Is VLC installed?" }),
+                serde_json::json!({
+                    "message": format!(
+                        "Failed to initialize libvlc (VLC_PLUGIN_PATH={plugin_path}). \
+                         On Debian/Ubuntu: sudo apt install libvlc5 vlc-plugin-base"
+                    )
+                }),
             );
             return;
         }

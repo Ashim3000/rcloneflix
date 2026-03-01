@@ -4,25 +4,17 @@ import { ArrowLeft, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Loader2 } from "
 import { invoke } from "@tauri-apps/api/core";
 import type { MediaItem } from "../../store/appStore";
 import { useAppStore } from "../../store/appStore";
+import * as pdfjsLib from "pdfjs-dist";
+import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 
-// pdfjs-dist loaded at runtime
-declare const pdfjsLib: {
-  GlobalWorkerOptions: { workerSrc: string };
-  getDocument: (url: string) => { promise: Promise<PDFDoc> };
-};
+// Vite resolves this new URL() at build time and bundles the worker asset
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/build/pdf.worker.min.mjs",
+  import.meta.url,
+).href;
 
-type PDFDoc = {
-  numPages: number;
-  getPage: (n: number) => Promise<PDFPage>;
-};
-
-type PDFPage = {
-  getViewport: (opts: { scale: number }) => { width: number; height: number };
-  render: (ctx: {
-    canvasContext: CanvasRenderingContext2D;
-    viewport: { width: number; height: number };
-  }) => { promise: Promise<void> };
-};
+type PDFDoc = PDFDocumentProxy;
+type PDFPage = PDFPageProxy;
 
 export function PdfReaderPage() {
   const location = useLocation();
@@ -71,17 +63,7 @@ export function PdfReaderPage() {
   useEffect(() => {
     if (!streamUrl) return;
 
-    const pdfjs = (window as unknown as Record<string, unknown>)["pdfjsLib"] as typeof pdfjsLib;
-    if (!pdfjs) {
-      setError("pdf.js not loaded.");
-      return;
-    }
-
-    // Set worker (bundled with pdfjs-dist)
-    pdfjs.GlobalWorkerOptions.workerSrc =
-      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js";
-
-    pdfjs
+    pdfjsLib
       .getDocument(streamUrl)
       .promise.then((pdf) => {
         pdfRef.current = pdf;

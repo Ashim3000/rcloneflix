@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F1218"/>
+      <stop offset="100%" stop-color="#06080A"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="42%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#E8A020" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#E8A020" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="play" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F5B732"/>
+      <stop offset="100%" stop-color="#C88010"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <!-- Subtle warm glow behind play button -->
+  <rect width="1024" height="1024" fill="url(#glow)"/>
+
+  <!-- Play triangle -->
+  <polygon points="316,252 316,772 808,512" fill="url(#play)"/>
+
+  <!-- Streaming arcs (signal / cloud connectivity) -->
+  <path d="M836 374 Q922 448 922 512 Q922 576 836 650"
+        fill="none" stroke="#E8A020" stroke-width="44"
+        stroke-linecap="round" opacity="0.55"/>
+  <path d="M888 308 Q996 406 996 512 Q996 618 888 716"
+        fill="none" stroke="#E8A020" stroke-width="32"
+        stroke-linecap="round" opacity="0.22"/>
+</svg>

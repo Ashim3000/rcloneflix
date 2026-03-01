@@ -144,11 +144,19 @@ async function fetchMusicBrainz(title: string): Promise<Partial<MediaItem>> {
     const data = await resp.json();
     const r = data.recordings?.[0];
     if (!r) return {};
+
+    const release = r.releases?.[0];
+    // Cover Art Archive: returns the front cover image for the release (follows redirect)
+    const posterUrl = release?.id
+      ? `https://coverartarchive.org/release/${release.id}/front`
+      : undefined;
+
     return {
       title: r.title ?? title,
       artist: r["artist-credit"]?.[0]?.name,
-      album: r.releases?.[0]?.title,
-      year: r.releases?.[0]?.date ? parseInt(r.releases[0].date.split("-")[0]) : undefined,
+      album: release?.title,
+      year: release?.date ? parseInt(release.date.split("-")[0]) : undefined,
+      posterUrl,
       metadataId: r.id,
       metadataSource: "musicbrainz" as const,
       metadataConfidence: "high" as const,

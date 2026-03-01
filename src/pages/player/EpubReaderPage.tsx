@@ -5,18 +5,7 @@ import { ChevronLeft, ChevronRight, ArrowLeft, Type, BookOpen } from "lucide-rea
 import { invoke } from "@tauri-apps/api/core";
 import type { MediaItem } from "../../store/appStore";
 import { useAppStore } from "../../store/appStore";
-
-// epub.js is loaded via CDN in index.html for simplicity
-declare const ePub: (url: string) => {
-  renderTo: (el: Element, options?: object) => {
-    display: (cfi?: string) => Promise<void>;
-    next: () => Promise<void>;
-    prev: () => Promise<void>;
-    on: (event: string, cb: (cfi: string) => void) => void;
-    themes: { fontSize: (s: string) => void; select: (name: string) => void; register: (name: string, styles: object) => void };
-    location: { start: { cfi: string } };
-  };
-};
+import Epub from "epubjs";
 
 type ReaderSettings = {
   fontSize: number;
@@ -70,14 +59,7 @@ export function EpubReaderPage() {
   useEffect(() => {
     if (!streamUrl || !containerRef.current) return;
 
-    // epub.js must be loaded; check if available
-    if (typeof (window as unknown as Record<string, unknown>)["ePub"] === "undefined") {
-      setError("epub.js not loaded. Please check your internet connection.");
-      return;
-    }
-
-    const epubFn = (window as unknown as Record<string, unknown>)["ePub"] as typeof ePub;
-    const book = epubFn(streamUrl);
+    const book = Epub(streamUrl);
     const rendition = book.renderTo(containerRef.current!, {
       width: "100%",
       height: "100%",

@@ -28,10 +28,12 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
+            librsvg2-bin \
             imagemagick \
             libvlc-dev \
             libvlccore-dev \
             vlc-plugin-base \
+            vlc-plugin-video-output \
             libfuse2
 
       # ── 3. Install rclone into resources folder ────────────────────────────
@@ -91,16 +93,10 @@ jobs:
       - name: Install npm dependencies
         run: npm install
 
-      # ── 8. Generate app icons ──────────────────────────────────────────────
+      # ── 8. Generate app icons from the committed SVG ───────────────────────
       - name: Generate app icons
         run: |
-          convert -size 1024x1024 xc:#080A0F \
-            -fill '#E8A020' \
-            -font DejaVu-Sans-Bold \
-            -pointsize 600 \
-            -gravity center \
-            -annotate 0 'R' \
-            /tmp/icon.png
+          rsvg-convert -w 1024 -h 1024 src-tauri/app-icon.svg -o /tmp/icon.png
           npx tauri icon /tmp/icon.png
 
       # ── 9. Add resources back to tauri.conf.json ──────────────────────────
@@ -110,8 +106,9 @@ jobs:
             const fs = require('fs');
             const conf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
             const hasPlugins = !fs.existsSync('src-tauri/resources/.vlc-plugins-missing');
+            // Map the whole vlc/ directory (contains plugins/) — avoids glob issues
             conf.bundle.resources = hasPlugins
-              ? { 'resources/rclone': 'rclone', 'resources/vlc/plugins/**': 'vlc/plugins' }
+              ? { 'resources/rclone': 'rclone', 'resources/vlc/': 'vlc/' }
               : { 'resources/rclone': 'rclone' };
             console.log('Bundling VLC plugins:', hasPlugins);
             fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2));
