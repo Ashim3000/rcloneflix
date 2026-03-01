@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import { motion } from "framer-motion";
-import { ChevronLeft, Search, Music, Disc33, Clock } from "lucide-react";
+import { ChevronLeft, Search, Music, Disc3, Clock } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   useAppStore,
