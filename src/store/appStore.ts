@@ -287,7 +287,7 @@ export const useAppStore = create<AppStore>()(
               (lib.remotePath ? [lib.remotePath as string] : []),
           }));
         }
-        return state;
+        return state as unknown as AppStore;
       },
       partialize: (s) => ({
         ...s,

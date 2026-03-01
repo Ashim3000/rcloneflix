@@ -312,7 +312,7 @@ export async function scanLibrary(library: Library, apiKeys: { tmdb: string; the
       "success"
     );
 
-    return { newItems: newItems.length, removed: result.removed_paths.length };
+    return { newItems: newItems.length, removed: allRemovedPaths.length };
   } catch (e) {
     const errorMessage = e instanceof Error ? e.message : String(e);
     setScanState({ status: "error", lastError: errorMessage, currentLibrary: undefined });
