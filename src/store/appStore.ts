@@ -308,6 +308,49 @@ export function selectInProgress(
     .map((p) => ({ ...items[p.itemId], progress: p }));
 }
 
+// ─── Music hierarchy ──────────────────────────────────────────────────────────
+
+export type MusicAlbum = {
+  name: string;
+  artistName: string;
+  year?: number;
+  posterUrl?: string;
+  tracks: MediaItem[];
+};
+
+export type MusicArtist = {
+  name: string;
+  posterUrl?: string;
+  albums: Record<string, MusicAlbum>;
+  albumCount: number;
+  trackCount: number;
+};
+
+export function selectMusicArtists(items: Record<string, MediaItem>, libraryId: string): MusicArtist[] {
+  const tracks = Object.values(items).filter(
+    (i) => i.libraryId === libraryId && (i.libraryType === "music" || i.libraryType === "audiobooks")
+  );
+  const artistMap: Record<string, MusicArtist> = {};
+  for (const track of tracks) {
+    const artistName = track.artist ?? "Unknown Artist";
+    const albumName = track.album ?? "Unknown Album";
+    if (!artistMap[artistName]) {
+      artistMap[artistName] = { name: artistName, posterUrl: undefined, albums: {}, albumCount: 0, trackCount: 0 };
+    }
+    const artist = artistMap[artistName];
+    if (!artist.albums[albumName]) {
+      artist.albums[albumName] = { name: albumName, artistName, year: track.year, posterUrl: track.posterUrl, tracks: [] };
+      artist.albumCount++;
+    }
+    // Use first available poster as the artist image
+    if (!artist.posterUrl && track.posterUrl) artist.posterUrl = track.posterUrl;
+    artist.albums[albumName].tracks.push(track);
+    artist.albums[albumName].tracks.sort((a, b) => (a.trackNumber ?? 999) - (b.trackNumber ?? 999));
+    artist.trackCount++;
+  }
+  return Object.values(artistMap).sort((a, b) => a.name.localeCompare(b.name));
+}
+
 // Group TV episodes into Show -> Season -> Episode hierarchy
 export function selectTvShows(items: Record<string, MediaItem>, libraryId: string): TvShow[] {
   const episodes = Object.values(items).filter(

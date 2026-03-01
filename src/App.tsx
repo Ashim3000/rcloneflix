@@ -6,6 +6,7 @@ import { HomePage } from "./pages/HomePage";
 import { LibraryPage } from "./pages/LibraryPage";
 import { TvLibraryPage } from "./pages/tv/TvLibraryPage";
 import { TvShowPage } from "./pages/tv/TvShowPage";
+import { MusicLibraryPage } from "./pages/music/MusicLibraryPage";
 import { MediaDetailPage } from "./pages/detail/MediaDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { VideoPlayerPage } from "./pages/player/VideoPlayerPage";
@@ -31,7 +32,7 @@ export default function App() {
         <Route path="/movies" element={<LibraryPage libraryType="movies" />} />
         <Route path="/tv" element={<TvLibraryPage />} />
         <Route path="/tv/show/:showId" element={<TvShowPage />} />
-        <Route path="/music" element={<LibraryPage libraryType="music" />} />
+        <Route path="/music" element={<MusicLibraryPage />} />
         <Route path="/audiobooks" element={<LibraryPage libraryType="audiobooks" />} />
         <Route path="/books" element={<LibraryPage libraryType="books" />} />
         <Route path="/adult" element={<LibraryPage libraryType="adult" />} />
