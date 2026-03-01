@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::{mpsc, Mutex};
@@ -25,8 +26,10 @@ enum VlcCmd {
 
 pub struct VlcManager {
     cmd_tx: Mutex<mpsc::SyncSender<VlcCmd>>,
-    /// rclone serve http child process, present only when FUSE mount wasn't found
+    /// rclone serve http child process for video (VLC path)
     serve_child: Mutex<Option<Child>>,
+    /// rclone serve http processes for epub/pdf readers, keyed by session id
+    book_sessions: Mutex<HashMap<String, Child>>,
 }
 
 impl VlcManager {
@@ -36,6 +39,7 @@ impl VlcManager {
         VlcManager {
             cmd_tx: Mutex::new(tx),
             serve_child: Mutex::new(None),
+            book_sessions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -53,6 +57,11 @@ impl Drop for VlcManager {
         }
         if let Ok(mut guard) = self.serve_child.lock() {
             if let Some(mut c) = guard.take() {
+                let _ = c.kill();
+            }
+        }
+        if let Ok(mut map) = self.book_sessions.lock() {
+            for (_, mut c) in map.drain() {
                 let _ = c.kill();
             }
         }
@@ -433,10 +442,80 @@ pub async fn player_stop(vlc: State<'_, VlcManager>) -> Result<(), String> {
     Ok(())
 }
 
-/// Kept as alias so any callers using the old name still compile.
+/// Start an rclone HTTP server for an epub/pdf file and return its URL.
+/// Falls back to a file:// URL when a FUSE mount is detected.
 #[tauri::command]
-pub async fn stop_stream_session(vlc: State<'_, VlcManager>) -> Result<(), String> {
-    player_stop(vlc).await
+pub async fn start_stream_session(
+    app: AppHandle,
+    vlc: State<'_, VlcManager>,
+    config_path: String,
+    remote_root: String,
+    file_path: String,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
+    // Kill any previous session with the same id
+    {
+        let mut map = vlc.book_sessions.lock().unwrap();
+        if let Some(mut old) = map.remove(&session_id) {
+            let _ = old.kill();
+        }
+    }
+
+    let (remote_name, root_sub_path) = parse_remote_root(&remote_root);
+    let full_relative = format!(
+        "{}/{}",
+        root_sub_path.trim_matches('/'),
+        file_path.trim_start_matches('/')
+    );
+    let full_relative = full_relative.trim_start_matches('/').to_string();
+
+    // Prefer FUSE mount (zero-overhead, works offline)
+    if let Some(local_path) = find_fuse_local_path(remote_name, &full_relative) {
+        let url = format!("file://{}", local_path.to_string_lossy());
+        return Ok(serde_json::json!({ "file_url": url }));
+    }
+
+    // Fall back: spin up rclone serve http for the remote root
+    let port = portpicker::pick_unused_port().ok_or("No available port")?;
+    let rclone = rclone_binary(&app);
+
+    let child = Command::new(&rclone)
+        .args([
+            "serve", "http",
+            "--config", &config_path,
+            "--addr", &format!("127.0.0.1:{}", port),
+            "--read-only",
+            "--no-checksum",
+            &remote_root,
+        ])
+        .spawn()
+        .map_err(|e| format!("Failed to start rclone serve: {}", e))?;
+
+    wait_for_port(port).await?;
+
+    {
+        let mut map = vlc.book_sessions.lock().unwrap();
+        map.insert(session_id, child);
+    }
+
+    let encoded = percent_encode_path(&full_relative);
+    let file_url = format!("http://127.0.0.1:{}/{}", port, encoded);
+    Ok(serde_json::json!({ "file_url": file_url }))
+}
+
+/// Stop a book (epub/pdf) stream session by its session id.
+#[tauri::command]
+pub async fn stop_stream_session(
+    vlc: State<'_, VlcManager>,
+    session_id: Option<String>,
+) -> Result<(), String> {
+    if let Some(sid) = session_id {
+        let mut map = vlc.book_sessions.lock().unwrap();
+        if let Some(mut child) = map.remove(&sid) {
+            let _ = child.kill();
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

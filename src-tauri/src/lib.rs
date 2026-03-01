@@ -27,6 +27,7 @@ pub fn run() {
             commands::scan::parse_media_filename,
             commands::scan::hash_remote_path,
             commands::player::open_media,
+            commands::player::start_stream_session,
             commands::player::player_play,
             commands::player::player_pause,
             commands::player::player_seek,

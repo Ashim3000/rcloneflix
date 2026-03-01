@@ -28,7 +28,10 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            imagemagick
+            imagemagick \
+            libvlc-dev \
+            libvlccore-dev \
+            libfuse2
 
       # ── 3. Install rclone into resources folder ────────────────────────────
       - name: Bundle rclone binary
@@ -85,6 +88,10 @@ jobs:
 
       # ── 10. Build the app ──────────────────────────────────────────────────
       - name: Build RcloneFlix
+        env:
+          # Allows linuxdeploy/appimagetool (AppImages themselves) to run
+          # without FUSE by extracting themselves into a temp directory.
+          APPIMAGE_EXTRACT_AND_RUN: 1
         run: npm run tauri build
 
       # ── 11. Upload .deb as artifact ────────────────────────────────────────
