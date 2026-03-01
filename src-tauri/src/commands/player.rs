@@ -560,7 +560,20 @@ pub async fn stop_stream_session(
 
 #[tauri::command]
 pub async fn stop_all_sessions(vlc: State<'_, VlcManager>) -> Result<(), String> {
-    player_stop(vlc).await
+    // Kill VLC + its rclone serve child
+    let _ = vlc.send(VlcCmd::Stop);
+    if let Ok(mut guard) = vlc.serve_child.lock() {
+        if let Some(mut c) = guard.take() {
+            let _ = c.kill();
+        }
+    }
+    // Kill all book (epub/pdf) rclone serve sessions
+    if let Ok(mut map) = vlc.book_sessions.lock() {
+        for (_, mut c) in map.drain() {
+            let _ = c.kill();
+        }
+    }
+    Ok(())
 }
 
 // ── Legacy media info (ffprobe) ───────────────────────────────────────────────

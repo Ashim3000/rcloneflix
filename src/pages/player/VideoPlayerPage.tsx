@@ -196,7 +196,7 @@ export function VideoPlayerPage() {
       updateWatchProgress({
         itemId: item.id,
         position: currentTimeRef.current,
-        duration: durationRef.current || ps.duration,
+        duration: durationRef.current,
         completed:
           durationRef.current > 0 &&
           currentTimeRef.current / durationRef.current > 0.9,
@@ -204,7 +204,7 @@ export function VideoPlayerPage() {
       });
     }
     navigate(-1);
-  }, [item, ps.duration]);
+  }, [item]);
 
   const setVolume = useCallback((vol: number, muted: boolean) => {
     const effective = muted ? 0 : vol;

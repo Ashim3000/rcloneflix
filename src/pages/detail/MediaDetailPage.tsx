@@ -34,7 +34,10 @@ export function MediaDetailPage() {
       navigate("/play/pdf", { state: { item } });
     } else if (["mp3","flac","aac","ogg","m4a","wav","opus","m4b"].includes(ext)) {
       if (library) {
-        const relPath = item.remotePath.replace(library.remotePath.replace(/\/$/, "") + "/", "");
+        const libRoot = library.remotePath.replace(/\/$/, "");
+        const relPath = item.remotePath.startsWith(libRoot + "/")
+          ? item.remotePath.slice(libRoot.length + 1)
+          : item.remotePath.split("/").pop() ?? item.filename;
         try {
           const session = await invoke<{ file_url: string }>("start_stream_session", {
             configPath: rcloneConfigPath,

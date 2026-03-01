@@ -138,7 +138,7 @@ async function fetchMusicBrainz(title: string): Promise<Partial<MediaItem>> {
   try {
     const resp = await fetch(
       `https://musicbrainz.org/ws/2/recording?query=${encodeURIComponent(title)}&limit=1&fmt=json`,
-      { headers: { "User-Agent": "RcloneFlix/0.1 (rcloneflix@example.com)" } }
+      { headers: { "User-Agent": "RcloneFlix/0.1 (https://github.com/Ashim3000/rcloneflix)" } }
     );
     if (!resp.ok) return {};
     const data = await resp.json();
