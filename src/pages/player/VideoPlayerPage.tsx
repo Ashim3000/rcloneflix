@@ -43,6 +43,17 @@ export function VideoPlayerPage() {
     buffering: true, showControls: true, error: null,
   });
 
+  // ── Transparent body so VLC renders through the WebView ─────────────────────
+
+  useEffect(() => {
+    document.body.style.background = "transparent";
+    document.documentElement.style.background = "transparent";
+    return () => {
+      document.body.style.background = "";
+      document.documentElement.style.background = "";
+    };
+  }, []);
+
   // ── Start playback ──────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -299,7 +310,7 @@ export function VideoPlayerPage() {
   return (
     <div
       ref={containerRef}
-      className="fixed inset-0 bg-black flex items-center justify-center select-none"
+      className="fixed inset-0 flex items-center justify-center select-none"
       onMouseMove={showControlsTemp}
       style={{ cursor: ps.showControls ? "default" : "none" }}
     >
@@ -309,7 +320,7 @@ export function VideoPlayerPage() {
 
       {/* Loading */}
       {loading && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 z-10">
+        <div className="absolute inset-0 bg-black flex flex-col items-center justify-center gap-4 z-10">
           <Loader2 size={40} className="text-accent animate-spin" />
           <p className="text-white/70 font-body text-sm">Starting stream…</p>
         </div>
@@ -317,7 +328,7 @@ export function VideoPlayerPage() {
 
       {/* Error */}
       {ps.error && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 z-10 px-8">
+        <div className="absolute inset-0 bg-black flex flex-col items-center justify-center gap-4 z-10 px-8">
           <p className="text-danger font-body text-center">{ps.error}</p>
           <p className="text-white/50 font-body text-sm text-center">
             Make sure rclone can access this remote and the file exists.

@@ -43,10 +43,11 @@ impl VlcManager {
         }
     }
 
-    fn send(&self, cmd: VlcCmd) {
-        if let Ok(tx) = self.cmd_tx.lock() {
-            let _ = tx.send(cmd);
-        }
+    fn send(&self, cmd: VlcCmd) -> bool {
+        self.cmd_tx
+            .lock()
+            .map(|tx| tx.send(cmd).is_ok())
+            .unwrap_or(false)
     }
 }
 
@@ -400,41 +401,46 @@ pub async fn open_media(
     // Tell VLC which X11 window to render into (must be sent before Open)
     #[cfg(target_os = "linux")]
     if let Some(xid) = xid {
-        vlc.send(VlcCmd::SetWindow(xid));
+        let _ = vlc.send(VlcCmd::SetWindow(xid));
     }
 
-    vlc.send(VlcCmd::Open { url, start_ms });
+    if !vlc.send(VlcCmd::Open { url, start_ms }) {
+        return Err(
+            "VLC is not available. Make sure libvlc5 is installed (sudo apt install libvlc5)."
+                .to_string(),
+        );
+    }
     Ok(())
 }
 
 #[tauri::command]
 pub async fn player_play(vlc: State<'_, VlcManager>) -> Result<(), String> {
-    vlc.send(VlcCmd::Play);
+    let _ = vlc.send(VlcCmd::Play);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn player_pause(vlc: State<'_, VlcManager>) -> Result<(), String> {
-    vlc.send(VlcCmd::Pause);
+    let _ = vlc.send(VlcCmd::Pause);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn player_seek(vlc: State<'_, VlcManager>, ms: i64) -> Result<(), String> {
-    vlc.send(VlcCmd::Seek(ms));
+    let _ = vlc.send(VlcCmd::Seek(ms));
     Ok(())
 }
 
 /// vol is 0-100 (maps to VLC's 0-100 normal range)
 #[tauri::command]
 pub async fn player_set_volume(vlc: State<'_, VlcManager>, vol: i32) -> Result<(), String> {
-    vlc.send(VlcCmd::SetVolume(vol.clamp(0, 100)));
+    let _ = vlc.send(VlcCmd::SetVolume(vol.clamp(0, 100)));
     Ok(())
 }
 
 #[tauri::command]
 pub async fn player_stop(vlc: State<'_, VlcManager>) -> Result<(), String> {
-    vlc.send(VlcCmd::Stop);
+    let _ = vlc.send(VlcCmd::Stop);
     let mut guard = vlc.serve_child.lock().unwrap();
     if let Some(mut c) = guard.take() {
         let _ = c.kill();
