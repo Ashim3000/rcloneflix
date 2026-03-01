@@ -19,7 +19,8 @@ pub fn run() {
             if let Ok(resource_dir) = app.path().resource_dir() {
                 let bundled_plugins = resource_dir.join("vlc/plugins");
                 if bundled_plugins.exists() {
-                    std::env::set_var("VLC_PLUGIN_PATH", bundled_plugins);
+                    // SAFETY: called in setup before worker threads start
+                    unsafe { std::env::set_var("VLC_PLUGIN_PATH", bundled_plugins) };
                 }
             }
 

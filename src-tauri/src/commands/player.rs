@@ -371,6 +371,11 @@ pub async fn open_media(
         let port = portpicker::pick_unused_port().ok_or("No available port")?;
         let rclone = rclone_binary(&app);
 
+        let _ = app.emit(
+            "rclone:status",
+            serde_json::json!({ "state": "starting", "message": "Connecting to remote…" }),
+        );
+
         let child = Command::new(&rclone)
             .args([
                 "serve",
@@ -390,6 +395,11 @@ pub async fn open_media(
 
         // Wait until rclone's HTTP server is accepting connections
         wait_for_port(port).await?;
+
+        let _ = app.emit(
+            "rclone:status",
+            serde_json::json!({ "state": "ready", "message": "Stream ready" }),
+        );
 
         {
             let mut guard = vlc.serve_child.lock().unwrap();
@@ -487,6 +497,11 @@ pub async fn start_stream_session(
     let port = portpicker::pick_unused_port().ok_or("No available port")?;
     let rclone = rclone_binary(&app);
 
+    let _ = app.emit(
+        "rclone:status",
+        serde_json::json!({ "state": "starting", "message": "Connecting to remote…" }),
+    );
+
     let child = Command::new(&rclone)
         .args([
             "serve", "http",
@@ -501,6 +516,11 @@ pub async fn start_stream_session(
         .map_err(|e| format!("Failed to start rclone serve: {}", e))?;
 
     wait_for_port(port).await?;
+
+    let _ = app.emit(
+        "rclone:status",
+        serde_json::json!({ "state": "ready", "message": "Stream ready" }),
+    );
 
     {
         let mut map = vlc.book_sessions.lock().unwrap();

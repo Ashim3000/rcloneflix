@@ -37,6 +37,10 @@ export function VideoPlayerPage() {
   const { rcloneConfigPath, libraries, updateWatchProgress, watchProgress } = useAppStore();
 
   const [loading, setLoading] = useState(true);
+  const [rcloneStatus, setRcloneStatus] = useState<{ state: string; message: string }>({
+    state: "idle",
+    message: "",
+  });
   const [ps, setPs] = useState<PlayerState>({
     playing: false, currentTime: 0, duration: 0,
     volume: 1, muted: false, fullscreen: false,
@@ -133,6 +137,10 @@ export function VideoPlayerPage() {
 
     listen<{ message: string }>("vlc:error", (ev) => {
       setPs((s) => ({ ...s, error: ev.payload.message, buffering: false }));
+    }).then((fn) => unlisteners.push(fn));
+
+    listen<{ state: string; message: string }>("rclone:status", (ev) => {
+      setRcloneStatus({ state: ev.payload.state, message: ev.payload.message });
     }).then((fn) => unlisteners.push(fn));
 
     return () => {
@@ -322,7 +330,16 @@ export function VideoPlayerPage() {
       {loading && (
         <div className="absolute inset-0 bg-black flex flex-col items-center justify-center gap-4 z-10">
           <Loader2 size={40} className="text-accent animate-spin" />
-          <p className="text-white/70 font-body text-sm">Starting stream…</p>
+          <p className="text-white/70 font-body text-sm">
+            {rcloneStatus.state === "starting"
+              ? "Connecting to remote…"
+              : rcloneStatus.state === "ready"
+              ? "Initialising player…"
+              : "Starting stream…"}
+          </p>
+          {rcloneStatus.state === "ready" && (
+            <p className="text-white/30 font-body text-xs">rclone serve ready</p>
+          )}
         </div>
       )}
 
