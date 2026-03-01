@@ -2,7 +2,6 @@ import { memo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Play, MoreVertical, Wrench, CheckCircle2, Clock } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { invoke } from "@tauri-apps/api/core";
 import { useAppStore, type MediaItem, type WatchProgress } from "../../store/appStore";
 
 type Props = {
@@ -43,49 +42,22 @@ export const MediaCard = memo(function MediaCard({ item, progress, onPlay, onFix
   // Scoped selectors so this card only re-renders when these specific
   // values change — not on every unrelated store update (scan progress,
   // other items' watch progress, adult unlock, etc.)
-  const rcloneConfigPath = useAppStore((s) => s.rcloneConfigPath);
-  const libraries = useAppStore((s) => s.libraries);
-
   // Determine play route based on file extension and library type
-  const handlePlay = async (mediaItem: MediaItem) => {
+  const handlePlay = (mediaItem: MediaItem) => {
     if (onPlay) { onPlay(mediaItem); return; }
 
     const ext = mediaItem.filename.split(".").pop()?.toLowerCase() ?? "";
-    const library = libraries.find((l) => l.id === mediaItem.libraryId);
-    if (!library) return;
 
     if (ext === "epub") {
       navigate("/play/epub", { state: { item: mediaItem } });
     } else if (ext === "pdf") {
       navigate("/play/pdf", { state: { item: mediaItem } });
     } else if (["mp3","flac","aac","ogg","m4a","wav","opus","m4b"].includes(ext)) {
-      // Audio — start stream and pass to mini-player via outlet context
-      try {
-        const libRoot = library.remotePath.replace(/\/$/, "");
-        const relPath = mediaItem.remotePath.startsWith(libRoot + "/")
-          ? mediaItem.remotePath.slice(libRoot.length + 1)
-          : mediaItem.remotePath.split("/").pop() ?? mediaItem.filename;
-        const session = await invoke<{ file_url: string }>("start_stream_session", {
-          configPath: rcloneConfigPath,
-          remoteRoot: library.remotePath,
-          filePath: relPath,
-          sessionId: `audio-${mediaItem.id}`,
-        });
-        // Dispatch to AppShell audio player
-        window.dispatchEvent(new CustomEvent("rcloneflix:play-audio", {
-          detail: { item: mediaItem, streamUrl: session.file_url }
-        }));
-      } catch (e) {
-        console.error("Failed to start audio stream:", e);
-      }
+      window.dispatchEvent(new CustomEvent("rcloneflix:play-audio", {
+        detail: { playlist: [mediaItem], playlistIndex: 0 },
+      }));
     } else {
-      // Video
-      navigate("/play/video", {
-        state: {
-          item: mediaItem,
-          resumeAt: progress?.position,
-        }
-      });
+      navigate("/play/video", { state: { item: mediaItem, resumeAt: progress?.position } });
     }
   };
 

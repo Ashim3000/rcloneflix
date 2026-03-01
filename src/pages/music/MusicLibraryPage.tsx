@@ -1,7 +1,6 @@
-import { useState, useMemo } from "react";
+import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { ChevronLeft, Search, Music, Disc3, Clock } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
 import {
   useAppStore,
   selectMusicArtists,
@@ -31,12 +30,11 @@ function formatDuration(seconds: number | undefined) {
 }
 
 export function MusicLibraryPage() {
-  const { libraries, mediaItems, rcloneConfigPath, tmdbApiKey, thePornDbApiKey } = useAppStore();
+  const { libraries, mediaItems, tmdbApiKey, thePornDbApiKey } = useAppStore();
   const [view, setView] = useState<View>("artists");
   const [selectedArtist, setSelectedArtist] = useState<MusicArtist | null>(null);
   const [selectedAlbum, setSelectedAlbum] = useState<MusicAlbum | null>(null);
   const [search, setSearch] = useState("");
-  const [playingId, setPlayingId] = useState<string | null>(null);
 
   const library = libraries.find((l) => l.type === "music");
 
@@ -79,31 +77,13 @@ export function MusicLibraryPage() {
     else if (view === "albums") { setSelectedArtist(null); setView("artists"); }
   };
 
-  const playTrack = async (track: MediaItem) => {
-    if (!library) return;
-    setPlayingId(track.id);
-    try {
-      const libRoot = library.remotePath.replace(/\/$/, "");
-      const relPath = track.remotePath.startsWith(libRoot + "/")
-        ? track.remotePath.slice(libRoot.length + 1)
-        : track.remotePath.split("/").pop() ?? track.filename;
-
-      const result = await invoke<{ file_url: string }>("start_stream_session", {
-        configPath: rcloneConfigPath,
-        remoteRoot: library.remotePath,
-        filePath: relPath,
-        sessionId: `music-${track.id}`,
-      });
-      window.dispatchEvent(
-        new CustomEvent("rcloneflix:play-audio", {
-          detail: { item: track, streamUrl: result.file_url },
-        })
-      );
-    } catch (e) {
-      console.error("Failed to stream track:", e);
-    } finally {
-      setPlayingId(null);
-    }
+  // Dispatch playlist context so AudioMiniPlayer can handle download + prefetch.
+  const playTrack = (index: number) => {
+    window.dispatchEvent(
+      new CustomEvent("rcloneflix:play-audio", {
+        detail: { playlist: filteredTracks, playlistIndex: index },
+      })
+    );
   };
 
   // ── Breadcrumb ─────────────────────────────────────────────────────────────
@@ -294,8 +274,7 @@ export function MusicLibraryPage() {
                       key={track.id}
                       track={track}
                       index={i}
-                      isLoading={playingId === track.id}
-                      onClick={() => playTrack(track)}
+                      onClick={() => playTrack(i)}
                     />
                   ))}
                 </div>
@@ -388,12 +367,10 @@ function AlbumCard({ album, index, onClick }: { album: MusicAlbum; index: number
 function TrackRow({
   track,
   index,
-  isLoading,
   onClick,
 }: {
   track: MediaItem;
   index: number;
-  isLoading: boolean;
   onClick: () => void;
 }) {
   return (
@@ -406,11 +383,7 @@ function TrackRow({
         hover:bg-panel cursor-pointer group transition-colors"
     >
       <span className="text-subtle font-body text-sm text-right self-center">
-        {isLoading ? (
-          <span className="inline-block w-3 h-3 border-2 border-accent border-t-transparent rounded-full animate-spin" />
-        ) : (
-          track.trackNumber ?? index + 1
-        )}
+        {track.trackNumber ?? index + 1}
       </span>
       <div className="min-w-0 self-center">
         <p className="text-text font-body text-sm truncate group-hover:text-accent transition-colors">

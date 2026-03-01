@@ -84,10 +84,11 @@ export type TvShow = {
 
 export type WatchProgress = {
   itemId: string;
-  position: number;
+  position: number;       // seconds/ms for video/audio; 0 for epub (use cfi)
   duration: number;
   completed: boolean;
   lastWatchedAt: number;
+  cfi?: string;           // epubjs CFI string for epub resume
 };
 
 // ─── Scan State ───────────────────────────────────────────────────────────────

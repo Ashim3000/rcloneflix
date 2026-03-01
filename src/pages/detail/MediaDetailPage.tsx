@@ -4,12 +4,11 @@ import { motion } from "framer-motion";
 import { ArrowLeft, Play, Star, Clock, Calendar, Tag, Wrench } from "lucide-react";
 import { useAppStore, type MediaItem } from "../../store/appStore";
 import { FixMatchModal } from "../../components/library/FixMatchModal";
-import { invoke } from "@tauri-apps/api/core";
 
 export function MediaDetailPage() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { watchProgress, libraries, rcloneConfigPath } = useAppStore();
+  const { watchProgress } = useAppStore();
   const item = location.state?.item as MediaItem | undefined;
   const [showFixMatch, setShowFixMatch] = useState(false);
 
@@ -24,33 +23,18 @@ export function MediaDetailPage() {
   const progress = watchProgress[item.id];
   const pct = progress?.duration ? (progress.position / progress.duration) * 100 : 0;
 
-  const handlePlay = async () => {
+  const handlePlay = () => {
     const ext = item.filename.split(".").pop()?.toLowerCase() ?? "";
-    const library = libraries.find((l) => l.id === item.libraryId);
 
     if (ext === "epub") {
       navigate("/play/epub", { state: { item } });
     } else if (ext === "pdf") {
       navigate("/play/pdf", { state: { item } });
     } else if (["mp3","flac","aac","ogg","m4a","wav","opus","m4b"].includes(ext)) {
-      if (library) {
-        const libRoot = library.remotePath.replace(/\/$/, "");
-        const relPath = item.remotePath.startsWith(libRoot + "/")
-          ? item.remotePath.slice(libRoot.length + 1)
-          : item.remotePath.split("/").pop() ?? item.filename;
-        try {
-          const session = await invoke<{ file_url: string }>("start_stream_session", {
-            configPath: rcloneConfigPath,
-            remoteRoot: library.remotePath,
-            filePath: relPath,
-            sessionId: `audio-${item.id}`,
-          });
-          window.dispatchEvent(new CustomEvent("rcloneflix:play-audio", {
-            detail: { item, streamUrl: session.file_url }
-          }));
-          navigate(-1);
-        } catch (e) { console.error(e); }
-      }
+      window.dispatchEvent(new CustomEvent("rcloneflix:play-audio", {
+        detail: { playlist: [item], playlistIndex: 0 },
+      }));
+      navigate(-1);
     } else {
       navigate("/play/video", { state: { item, resumeAt: progress?.position } });
     }

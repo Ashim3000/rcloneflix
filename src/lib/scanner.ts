@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore, type MediaItem, type Library } from "../store/appStore";
+import { useToastStore } from "../store/toastStore";
 
 type DiscoveredFile = {
   remote_path: string;
@@ -189,6 +190,9 @@ async function fetchOpenLibrary(title: string): Promise<Partial<MediaItem>> {
 // ─── Main scan ────────────────────────────────────────────────────────────────
 
 export async function scanLibrary(library: Library, apiKeys: { tmdb: string; theporndb: string }) {
+  const currentStatus = useAppStore.getState().scanState.status;
+  if (currentStatus === "scanning") return;
+
   const store = useAppStore.getState();
   const { rcloneConfigPath, mediaItems, setScanState, bulkUpsertMediaItems, removeMediaItem } = store;
 
@@ -286,15 +290,23 @@ export async function scanLibrary(library: Library, apiKeys: { tmdb: string; the
       newItemsFound: newItems.length, currentLibrary: undefined,
     });
 
+    useToastStore.getState().addToast(
+      `Scan complete — ${newItems.length} new item${newItems.length !== 1 ? "s" : ""} found`,
+      "success"
+    );
+
     return { newItems: newItems.length, removed: result.removed_paths.length };
   } catch (e) {
-    setScanState({ status: "error", lastError: e instanceof Error ? e.message : String(e), currentLibrary: undefined });
+    const errorMessage = e instanceof Error ? e.message : String(e);
+    setScanState({ status: "error", lastError: errorMessage, currentLibrary: undefined });
+    useToastStore.getState().addToast(`Scan failed: ${errorMessage}`, "error", 6000);
     throw e;
   }
 }
 
 export async function scanAllLibraries() {
-  const { libraries, tmdbApiKey, thePornDbApiKey } = useAppStore.getState();
+  const { libraries, tmdbApiKey, thePornDbApiKey, scanState } = useAppStore.getState();
+  if (scanState.status === "scanning") return;
   const apiKeys = { tmdb: tmdbApiKey, theporndb: thePornDbApiKey };
   for (const library of libraries) {
     await scanLibrary(library, apiKeys);

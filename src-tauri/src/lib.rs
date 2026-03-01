@@ -48,6 +48,8 @@ pub fn run() {
             commands::player::stop_stream_session,
             commands::player::stop_all_sessions,
             commands::player::get_media_info,
+            commands::player::download_book_to_temp,
+            commands::player::cleanup_book_temp,
             commands::google::start_google_oauth,
             commands::google::save_google_tokens,
             commands::google::load_google_tokens,

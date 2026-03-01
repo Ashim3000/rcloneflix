@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Eye, EyeOff, Save, Lock, CheckCircle2, AlertCircle, Trash2,
   Plus, Edit2, X, RefreshCw, Cloud, CloudOff, LogOut, Chrome,
 } from "lucide-react";
+import { getVersion } from "@tauri-apps/api/app";
 import { useAppStore, type Library, type LibraryType } from "../store/appStore";
 import { hashPin, verifyPin } from "../lib/pin";
 import { ScanBar } from "../components/common/ScanBar";
@@ -30,6 +31,9 @@ export function SettingsPage() {
     adultSettings, setAdultHidden, setAdultPin, clearAdultPin,
     googleAccount, setGoogleAccount, syncState,
   } = useAppStore();
+
+  const [version, setVersion] = useState<string>("");
+  useEffect(() => { getVersion().then(setVersion).catch(() => {}); }, []);
 
   const [section, setSection] = useState<Section>("api-keys");
   const [showTmdb, setShowTmdb] = useState(false);
@@ -133,7 +137,7 @@ export function SettingsPage() {
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto px-8 py-6 max-w-2xl">
+        <div className="flex-1 overflow-y-auto px-8 py-6 max-w-2xl flex flex-col">
           <AnimatePresence mode="wait">
 
             {/* ── API Keys ── */}
@@ -513,6 +517,9 @@ export function SettingsPage() {
             )}
 
           </AnimatePresence>
+          {version && (
+            <p className="mt-auto pt-8 text-subtle font-body text-xs">App Version {version}</p>
+          )}
         </div>
       </div>
     </div>

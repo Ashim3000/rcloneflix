@@ -5,6 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Mutex};
 use std::thread;
 use std::time::Duration;
+use tokio::process::Command as TokioCommand;
 use tauri::{AppHandle, Emitter, Manager, State};
 use vlc::MediaPlayerAudioEx;
 
@@ -574,6 +575,75 @@ pub async fn stop_all_sessions(vlc: State<'_, VlcManager>) -> Result<(), String>
         }
     }
     Ok(())
+}
+
+// ── Book download (epub / pdf) ────────────────────────────────────────────────
+
+/// Download an epub or pdf to a per-session temp directory and return a
+/// `file://` URL. Falls back to a FUSE mount path immediately if one is
+/// already mounted — no download needed in that case.
+///
+/// Prefer this over `start_stream_session` for books: rclone copyto is a
+/// single download that exits cleanly, whereas rclone serve http keeps an
+/// entire HTTP process alive just to serve one file.
+#[tauri::command]
+pub async fn download_book_to_temp(
+    app: AppHandle,
+    config_path: String,
+    remote_path: String,   // full path, e.g. "gdrive:/Books/Author/book.epub"
+    session_id: String,
+) -> Result<String, String> {
+    // 1. FUSE fast-path (zero copy, works offline)
+    let (remote_name, sub_path) = parse_remote_root(&remote_path);
+    let sub_path = sub_path.trim_start_matches('/');
+    if let Some(local_path) = find_fuse_local_path(remote_name, sub_path) {
+        return Ok(format!("file://{}", local_path.to_string_lossy()));
+    }
+
+    // 2. Download via rclone copyto
+    let filename = remote_path
+        .rsplit('/')
+        .find(|s| !s.is_empty() && !s.ends_with(':'))
+        .unwrap_or("book");
+
+    let temp_dir = std::env::temp_dir()
+        .join("rcloneflix-books")
+        .join(&session_id);
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|e| format!("Failed to create temp dir: {}", e))?;
+
+    let local_path = temp_dir.join(filename);
+    let rclone = rclone_binary(&app);
+
+    let output = TokioCommand::new(&rclone)
+        .args([
+            "copyto",
+            "--config",
+            &config_path,
+            &remote_path,
+            local_path.to_str().unwrap_or(""),
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("rclone copyto failed: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("rclone copyto error: {}", stderr));
+    }
+
+    Ok(format!("file://{}", local_path.to_string_lossy()))
+}
+
+/// Delete the temp directory created by `download_book_to_temp` for this session.
+#[tauri::command]
+pub fn cleanup_book_temp(session_id: String) {
+    let temp_dir = std::env::temp_dir()
+        .join("rcloneflix-books")
+        .join(&session_id);
+    if temp_dir.exists() {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
 
 // ── Legacy media info (ffprobe) ───────────────────────────────────────────────

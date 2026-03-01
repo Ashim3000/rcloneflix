@@ -32,11 +32,15 @@ type ReaderSettings = {
   theme: "dark" | "sepia" | "light";
 };
 
+interface EpubLocation {
+  start: { cfi: string };
+}
+
 export function EpubReaderPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const { item } = (location.state ?? {}) as { item: MediaItem };
-  const { rcloneConfigPath, libraries, updateWatchProgress, watchProgress } = useAppStore();
+  const { rcloneConfigPath, updateWatchProgress, watchProgress } = useAppStore();
 
   const containerRef = useRef<HTMLDivElement>(null);
   const renditionRef = useRef<EpubRendition | null>(null);
@@ -44,34 +48,27 @@ export function EpubReaderPage() {
   const [settings, setSettings] = useState<ReaderSettings>({ fontSize: 16, theme: "dark" });
   const [showSettings, setShowSettings] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [downloading, setDownloading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
 
   const sessionId = useRef(`epub-${Date.now()}`);
 
-  // Start stream session to get the file URL
+  // Download the epub to a temp file and get a file:// URL.
+  // Much simpler than rclone serve http: one download, no persistent process.
   useEffect(() => {
     if (!item) return;
-    const library = libraries.find((l) => l.id === item.libraryId);
-    if (!library) return;
 
-    const remoteRoot = library.remotePath;
-    const libRoot = remoteRoot.replace(/\/$/, "");
-    const relPath = item.remotePath.startsWith(libRoot + "/")
-      ? item.remotePath.slice(libRoot.length + 1)
-      : item.remotePath.split("/").pop() ?? item.filename;
-
-    invoke<{ file_url: string }>("start_stream_session", {
+    invoke<string>("download_book_to_temp", {
       configPath: rcloneConfigPath,
-      remoteRoot,
-      filePath: relPath,
+      remotePath: item.remotePath,
       sessionId: sessionId.current,
     })
-      .then((s) => setStreamUrl(s.file_url))
-      .catch((e) => setError(String(e)));
+      .then((localUrl) => { setStreamUrl(localUrl); setDownloading(false); })
+      .catch((e) => { setError(String(e)); setDownloading(false); });
 
     return () => {
-      invoke("stop_stream_session", { sessionId: sessionId.current }).catch(() => {});
+      invoke("cleanup_book_temp", { sessionId: sessionId.current }).catch(() => {});
     };
   }, [item?.id]);
 
@@ -104,15 +101,16 @@ export function EpubReaderPage() {
 
     // Restore position
     const existing = watchProgress[item.id];
-    rendition.display(existing?.position ? String(existing.position) : undefined)
+    rendition.display(existing?.cfi ?? undefined)
       .then(() => setLoading(false))
       .catch(() => setLoading(false));
 
     // Save position on page turn
-    rendition.on("relocated", (location: string) => {
+    rendition.on("relocated", (loc: EpubLocation) => {
       updateWatchProgress({
         itemId: item.id,
-        position: location as unknown as number,
+        position: 0,
+        cfi: loc.start.cfi,
         duration: 0,
         completed: false,
         lastWatchedAt: Date.now(),
@@ -121,6 +119,8 @@ export function EpubReaderPage() {
 
     return () => {
       renditionRef.current = null;
+      rendition.destroy();
+      book.destroy();
     };
   }, [streamUrl]);
 
@@ -242,9 +242,11 @@ export function EpubReaderPage() {
 
         {/* Content */}
         <div className="flex-1 relative">
-          {loading && (
+          {(downloading || loading) && (
             <div className="absolute inset-0 flex items-center justify-center">
-              <p className="font-body text-sm opacity-50">Loading book...</p>
+              <p className="font-body text-sm opacity-50">
+                {downloading ? "Downloading book…" : "Loading book…"}
+              </p>
             </div>
           )}
           {error && (

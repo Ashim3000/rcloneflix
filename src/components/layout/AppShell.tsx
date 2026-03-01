@@ -3,21 +3,22 @@ import { Outlet } from "react-router-dom";
 import { AnimatePresence } from "framer-motion";
 import { Sidebar } from "./Sidebar";
 import { AudioMiniPlayer } from "../audioplayer/AudioMiniPlayer";
+import { ToastContainer } from "../ToastContainer";
 import type { MediaItem } from "../../store/appStore";
 
 type AudioState = {
-  item: MediaItem;
-  streamUrl: string;
+  playlist: MediaItem[];
+  playlistIndex: number;
 } | null;
 
 export function AppShell() {
   const [audioState, setAudioState] = useState<AudioState>(null);
 
-  // Listen for audio play events dispatched by MediaCard
+  // Listen for audio play events dispatched by MusicLibraryPage / MediaDetailPage
   useEffect(() => {
     const handler = (e: Event) => {
-      const { item, streamUrl } = (e as CustomEvent).detail;
-      setAudioState({ item, streamUrl });
+      const { playlist, playlistIndex } = (e as CustomEvent).detail;
+      setAudioState({ playlist, playlistIndex });
     };
     window.addEventListener("rcloneflix:play-audio", handler);
     return () => window.removeEventListener("rcloneflix:play-audio", handler);
@@ -36,14 +37,14 @@ export function AppShell() {
         <AnimatePresence>
           {audioState && (
             <AudioMiniPlayer
-              item={audioState.item}
-              streamUrl={audioState.streamUrl}
+              playlist={audioState.playlist}
+              playlistIndex={audioState.playlistIndex}
               onClose={() => setAudioState(null)}
-              
             />
           )}
         </AnimatePresence>
       </main>
+      <ToastContainer />
     </div>
   );
 }

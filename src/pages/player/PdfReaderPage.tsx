@@ -20,13 +20,14 @@ export function PdfReaderPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const { item } = (location.state ?? {}) as { item: MediaItem };
-  const { rcloneConfigPath, libraries, updateWatchProgress, watchProgress } = useAppStore();
+  const { rcloneConfigPath, updateWatchProgress, watchProgress } = useAppStore();
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pdfRef = useRef<PDFDoc | null>(null);
   const sessionId = useRef(`pdf-${Date.now()}`);
 
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
@@ -34,28 +35,20 @@ export function PdfReaderPage() {
   const [scale, setScale] = useState(1.2);
   const [rendering, setRendering] = useState(false);
 
-  // Start stream session
+  // Download the PDF to a temp file and get a file:// URL.
   useEffect(() => {
     if (!item) return;
-    const library = libraries.find((l) => l.id === item.libraryId);
-    if (!library) return;
 
-    const libRoot = library.remotePath.replace(/\/$/, "");
-    const relPath = item.remotePath.startsWith(libRoot + "/")
-      ? item.remotePath.slice(libRoot.length + 1)
-      : item.remotePath.split("/").pop() ?? item.filename;
-
-    invoke<{ file_url: string }>("start_stream_session", {
+    invoke<string>("download_book_to_temp", {
       configPath: rcloneConfigPath,
-      remoteRoot: library.remotePath,
-      filePath: relPath,
+      remotePath: item.remotePath,
       sessionId: sessionId.current,
     })
-      .then((s) => setStreamUrl(s.file_url))
-      .catch((e) => setError(String(e)));
+      .then((localUrl) => { setStreamUrl(localUrl); setDownloading(false); })
+      .catch((e) => { setError(String(e)); setDownloading(false); });
 
     return () => {
-      invoke("stop_stream_session", { sessionId: sessionId.current }).catch(() => {});
+      invoke("cleanup_book_temp", { sessionId: sessionId.current }).catch(() => {});
     };
   }, [item?.id]);
 
@@ -151,9 +144,12 @@ export function PdfReaderPage() {
 
       {/* PDF viewport */}
       <div className="flex-1 overflow-auto flex items-start justify-center p-6 relative">
-        {(loading || rendering) && (
-          <div className="absolute inset-0 flex items-center justify-center">
+        {(downloading || loading || rendering) && (
+          <div className="absolute inset-0 flex items-center justify-center flex-col gap-3">
             <Loader2 size={32} className="text-accent animate-spin" />
+            {downloading && (
+              <p className="font-body text-sm text-subtle">Downloading…</p>
+            )}
           </div>
         )}
         {error && (
@@ -176,7 +172,7 @@ export function PdfReaderPage() {
           min={1}
           max={totalPages}
           value={currentPage}
-          onChange={(e) => goTo(parseInt(e.target.value) || 1)}
+          onChange={(e) => { const n = parseInt(e.target.value); if (!isNaN(n)) goTo(n); }}
           className="w-16 bg-panel border border-border rounded px-2 py-1 text-text text-xs font-mono text-center outline-none focus:border-accent"
         />
       </div>
