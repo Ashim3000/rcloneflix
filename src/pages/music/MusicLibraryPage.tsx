@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import { motion } from "framer-motion";
-import { ChevronLeft, Search, Music, Disc, Clock } from "lucide-react";
+import { ChevronLeft, Search, Music, Disc33, Clock } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   useAppStore,
@@ -267,7 +267,7 @@ export function MusicLibraryPage() {
                       <img src={selectedAlbum.posterUrl} alt={selectedAlbum.name} className="w-full h-full object-cover" />
                     ) : (
                       <div className={`w-full h-full bg-gradient-to-br ${PALETTE[0]} flex items-center justify-center`}>
-                        <Disc size={40} className="text-white/40" />
+                        <Disc3 size={40} className="text-white/40" />
                       </div>
                     )}
                   </div>
@@ -369,7 +369,7 @@ function AlbumCard({ album, index, onClick }: { album: MusicAlbum; index: number
           />
         ) : (
           <div className={`w-full h-full bg-gradient-to-br ${PALETTE[index % PALETTE.length]} flex items-center justify-center`}>
-            <Disc size={32} className="text-white/40" />
+            <Disc3 size={32} className="text-white/40" />
           </div>
         )}
         {/* Track count badge */}
