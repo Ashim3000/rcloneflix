@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use tauri::AppHandle;
 use tauri::Manager;
 use crate::commands::player::{parse_remote_root, percent_encode_path, wait_for_port};
+
+// Global storage for the rclone serve child process (so it doesn't get dropped)
+use std::sync::Mutex;
+static SERVE_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
 /// Represents a single rclone remote parsed from the config file
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -214,8 +218,15 @@ pub async fn get_stream_url(
         // Wait for server to be ready
         match wait_for_port(port).await {
             Ok(()) => {
-                // Keep child process alive by letting it run in background
-                // Note: caller is responsible for stopping this when done
+                // Store child process in global so it doesn't get killed when dropped
+                if let Ok(mut guard) = SERVE_PROCESS.lock() {
+                    // Kill any previous process
+                    if let Some(mut old) = guard.take() {
+                        let _ = old.kill();
+                    }
+                    *guard = Some(child);
+                }
+                
                 let _ = app.emit(
                     "rclone:status",
                     serde_json::json!({ "state": "ready", "message": "Stream ready" }),
