@@ -64,8 +64,18 @@ export function EpubReaderPage() {
       remotePath: item.remotePath,
       sessionId: sessionId.current,
     })
-      .then((localPath) => { setStreamUrl(convertFileSrc(localPath)); setDownloading(false); })
-      .catch((e) => { setError(String(e)); setDownloading(false); });
+      .then((localPath) => { 
+        console.log("EPUB downloaded to:", localPath);
+        const assetUrl = convertFileSrc(localPath);
+        console.log("Asset URL:", assetUrl);
+        setStreamUrl(assetUrl); 
+        setDownloading(false); 
+      })
+      .catch((e) => { 
+        console.error("Failed to download EPUB:", e);
+        setError(String(e)); 
+        setDownloading(false); 
+      });
 
     return () => {
       invoke("cleanup_book_temp", { sessionId: sessionId.current }).catch(() => {});
@@ -76,12 +86,21 @@ export function EpubReaderPage() {
   useEffect(() => {
     if (!streamUrl || !containerRef.current) return;
 
-    const book = Epub(streamUrl);
-    const rendition = book.renderTo(containerRef.current!, {
-      width: "100%",
-      height: "100%",
-      spread: "none",
-    });
+    let book: EpubBook;
+    let rendition: EpubRendition;
+    
+    try {
+      book = Epub(streamUrl);
+      rendition = book.renderTo(containerRef.current!, {
+        width: "100%",
+        height: "100%",
+        spread: "none",
+      });
+    } catch (e) {
+      setError(`Failed to load EPUB: ${e}`);
+      setLoading(false);
+      return;
+    }
 
     renditionRef.current = rendition;
 

@@ -44,8 +44,18 @@ export function PdfReaderPage() {
       remotePath: item.remotePath,
       sessionId: sessionId.current,
     })
-      .then((localPath) => { setStreamUrl(convertFileSrc(localPath)); setDownloading(false); })
-      .catch((e) => { setError(String(e)); setDownloading(false); });
+      .then((localPath) => { 
+        console.log("PDF downloaded to:", localPath);
+        const assetUrl = convertFileSrc(localPath);
+        console.log("Asset URL:", assetUrl);
+        setStreamUrl(assetUrl); 
+        setDownloading(false); 
+      })
+      .catch((e) => { 
+        console.error("Failed to download PDF:", e);
+        setError(String(e)); 
+        setDownloading(false); 
+      });
 
     return () => {
       invoke("cleanup_book_temp", { sessionId: sessionId.current }).catch(() => {});

@@ -36,12 +36,15 @@ export function AudioMiniPlayer({ playlist, playlistIndex: initialIndex, onClose
     async (track: MediaItem): Promise<string> => {
       const cached = cachedUrls.current.get(track.id);
       if (cached) return cached;
+      console.log("Downloading audio:", track.filename);
       const localPath = await invoke<string>("download_book_to_temp", {
         configPath: rcloneConfigPath,
         remotePath: track.remotePath,
         sessionId: `audio-${track.id}`,
       });
+      console.log("Audio downloaded to:", localPath);
       const url = convertFileSrc(localPath);
+      console.log("Audio asset URL:", url);
       cachedUrls.current.set(track.id, url);
       return url;
     },

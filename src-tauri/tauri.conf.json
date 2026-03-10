@@ -27,9 +27,10 @@
     ],
     "security": {
       "csp": {
-        "default-src": "'self'",
-        "connect-src": "'self' https://api.themoviedb.org https://musicbrainz.org https://coverartarchive.org https://openlibrary.org https://theporndb.net https://accounts.google.com https://www.googleapis.com https://oauth2.googleapis.com",
-        "img-src": "'self' blob: data: https://image.tmdb.org https://covers.openlibrary.org",
+        "default-src": "'self' asset:",
+        "connect-src": "'self' asset: https://api.themoviedb.org https://musicbrainz.org https://coverartarchive.org https://openlibrary.org https://theporndb.net https://accounts.google.com https://www.googleapis.com https://oauth2.googleapis.com",
+        "img-src": "'self' asset: blob: data: https://image.tmdb.org https://covers.openlibrary.org",
+        "media-src": "'self' asset: blob:",
         "style-src": "'self' 'unsafe-inline' https://fonts.googleapis.com",
         "font-src": "'self' https://fonts.gstatic.com",
         "script-src": "'self'",
