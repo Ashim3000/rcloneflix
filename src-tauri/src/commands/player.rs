@@ -236,7 +236,7 @@ fn vlc_thread(rx: mpsc::Receiver<VlcCmd>, app: AppHandle) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn rclone_binary(app: &AppHandle) -> PathBuf {
+pub fn rclone_binary(app: &AppHandle) -> PathBuf {
     let resource_dir = app
         .path()
         .resource_dir()
@@ -246,7 +246,7 @@ fn rclone_binary(app: &AppHandle) -> PathBuf {
 }
 
 /// Parse "remote:/sub/path" into ("remote", "/sub/path").
-fn parse_remote_root(remote_root: &str) -> (&str, &str) {
+pub fn parse_remote_root(remote_root: &str) -> (&str, &str) {
     if let Some(pos) = remote_root.find(':') {
         let name = &remote_root[..pos];
         let path = &remote_root[pos + 1..];
@@ -258,7 +258,7 @@ fn parse_remote_root(remote_root: &str) -> (&str, &str) {
 
 /// Percent-encode a relative file path, encoding each segment but preserving '/'.
 /// Properly handles Unicode characters using UTF-8 encoding.
-fn percent_encode_path(path: &str) -> String {
+pub fn percent_encode_path(path: &str) -> String {
     const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
     
     path.split('/')
@@ -316,7 +316,7 @@ fn find_fuse_local_path(_remote_name: &str, _relative_path: &str) -> Option<Path
 }
 
 /// Poll until the TCP port is accepting connections (rclone serve http is ready).
-async fn wait_for_port(port: u16) -> Result<(), String> {
+pub async fn wait_for_port(port: u16) -> Result<(), String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
         if std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
