@@ -25,6 +25,7 @@ export function AudioMiniPlayer({ playlist, playlistIndex: initialIndex, onClose
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const currentTrack = playlist[currentIndex] ?? null;
 
@@ -37,16 +38,22 @@ export function AudioMiniPlayer({ playlist, playlistIndex: initialIndex, onClose
       const cached = cachedUrls.current.get(track.id);
       if (cached) return cached;
       console.log("Downloading audio:", track.filename);
-      const localPath = await invoke<string>("download_book_to_temp", {
-        configPath: rcloneConfigPath,
-        remotePath: track.remotePath,
-        sessionId: `audio-${track.id}`,
-      });
-      console.log("Audio downloaded to:", localPath);
-      const url = convertFileSrc(localPath);
-      console.log("Audio asset URL:", url);
-      cachedUrls.current.set(track.id, url);
-      return url;
+      try {
+        const localPath = await invoke<string>("download_book_to_temp", {
+          configPath: rcloneConfigPath,
+          remotePath: track.remotePath,
+          sessionId: `audio-${track.id}`,
+        });
+        console.log("Audio downloaded to:", localPath);
+        const url = convertFileSrc(localPath);
+        console.log("Audio asset URL:", url);
+        cachedUrls.current.set(track.id, url);
+        return url;
+      } catch (e) {
+        console.error("Failed to download audio:", e);
+        setError(`Download failed: ${e}`);
+        throw e;
+      }
     },
     [rcloneConfigPath]
   );
@@ -89,6 +96,7 @@ export function AudioMiniPlayer({ playlist, playlistIndex: initialIndex, onClose
     audioRef.current?.pause();
     setCurrentTime(0);
     setDuration(0);
+    setError(null);
 
     const cached = cachedUrls.current.get(currentTrack.id);
     if (cached) {
@@ -100,7 +108,10 @@ export function AudioMiniPlayer({ playlist, playlistIndex: initialIndex, onClose
       setDownloading(true);
       downloadTrack(currentTrack)
         .then((url) => { setCurrentUrl(url); setDownloading(false); })
-        .catch(() => setDownloading(false));
+        .catch((e) => { 
+          setDownloading(false);
+          // Error already set in downloadTrack
+        });
     }
   }, [currentIndex]);
 
@@ -112,7 +123,17 @@ export function AudioMiniPlayer({ playlist, playlistIndex: initialIndex, onClose
     const audio = audioRef.current;
     audio.src = currentUrl;
     audio.volume = muted ? 0 : volume;
-    audio.play().then(() => setPlaying(true)).catch(() => {});
+    
+    const onError = (e: Event) => {
+      console.error("Audio playback error:", e);
+      setError("Playback failed - check console for details");
+    };
+    audio.addEventListener("error", onError);
+    
+    audio.play().then(() => setPlaying(true)).catch((e) => {
+      console.error("Audio play failed:", e);
+      setError(`Playback failed: ${e.message}`);
+    });
 
     // Pre-download the next track while this one plays
     const next = playlist[currentIndex + 1];
