@@ -26,6 +26,7 @@ interface EpubRendition {
 interface EpubBook {
   renderTo(el: Element, options?: Record<string, unknown>): EpubRendition;
   destroy(): void;
+  on(event: string, callback: (...args: any[]) => void): void;
 }
 
 type ReaderSettings = {
