@@ -16,9 +16,11 @@ import { useAppStore, type AppConfig, type MediaItem, type WatchProgress } from 
 // ─── Bundled OAuth client ──────────────────────────────────────────────────────
 // Create a "Desktop app" OAuth 2.0 credential at https://console.cloud.google.com
 // Enable: Google Drive API, Google People API (for userinfo).
-// No client secret is needed — desktop apps use PKCE only.
+// IMPORTANT: PKCE flow for desktop apps does NOT use client_secret - 
+// the client_secret is only for confidential clients (web servers).
+// Desktop apps are public clients and should never include a secret.
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID as string;
-const GOOGLE_CLIENT_SECRET = import.meta.env.VITE_GOOGLE_CLIENT_SECRET as string;
+// GOOGLE_CLIENT_SECRET is intentionally NOT used - PKCE is the secure method for desktop apps
 
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
@@ -128,7 +130,7 @@ export async function exchangeOAuthCode(code: string): Promise<{
     body: new URLSearchParams({
       code,
       client_id: GOOGLE_CLIENT_ID,
-      client_secret: GOOGLE_CLIENT_SECRET,
+      // Note: No client_secret - PKCE flow for desktop apps doesn't require it
       redirect_uri: "http://localhost:9876/oauth/callback",
       code_verifier: verifier,
       grant_type: "authorization_code",
@@ -164,7 +166,7 @@ export async function refreshAccessToken(refreshToken: string): Promise<{
     body: new URLSearchParams({
       refresh_token: refreshToken,
       client_id: GOOGLE_CLIENT_ID,
-      client_secret: GOOGLE_CLIENT_SECRET,
+      // Note: No client_secret - PKCE refresh also works without it for desktop apps
       grant_type: "refresh_token",
     }),
   });

@@ -257,15 +257,21 @@ fn parse_remote_root(remote_root: &str) -> (&str, &str) {
 }
 
 /// Percent-encode a relative file path, encoding each segment but preserving '/'.
+/// Properly handles Unicode characters using UTF-8 encoding.
 fn percent_encode_path(path: &str) -> String {
+    const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
+    
     path.split('/')
         .map(|seg| {
-            let mut out = String::with_capacity(seg.len());
-            for byte in seg.bytes() {
-                match byte {
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
-                    | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
-                    _ => out.push_str(&format!("%{:02X}", byte)),
+            let mut out = String::with_capacity(seg.len() * 3);
+            for ch in seg.chars() {
+                if ch.is_ascii() && UNRESERVED.contains(&(ch as u8)) {
+                    out.push(ch);
+                } else {
+                    // Encode UTF-8 bytes
+                    for byte in ch.encode_utf8(&mut [0; 4]).as_bytes() {
+                        out.push_str(&format!("%{:02X}", byte));
+                    }
                 }
             }
             out

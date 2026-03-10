@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::process::Command;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_store::StoreExt;
-use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const STORE_PATH: &str = "rcloneflix-keys.json";
 
@@ -18,6 +18,7 @@ pub struct GoogleTokens {
 /// Open the Google OAuth URL in the system browser and start a local
 /// HTTP server on the given port to capture the redirect callback.
 /// Emits "oauth-callback" event with the code when it arrives.
+/// Server times out after 5 minutes to prevent indefinite resource usage.
 #[tauri::command]
 pub async fn start_google_oauth(
     app: AppHandle,
@@ -43,32 +44,61 @@ pub async fn start_google_oauth(
             Ok(l) => l,
             Err(e) => {
                 eprintln!("Failed to bind OAuth callback server: {}", e);
+                let _ = app_clone.emit("oauth-error", serde_json::json!({ 
+                    "error": format!("Failed to bind callback server: {}", e) 
+                }));
                 return;
             }
         };
 
-        // Accept one connection (the OAuth redirect)
-        if let Ok((mut stream, _)) = listener.accept().await {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut buf = vec![0u8; 4096];
-            if let Ok(n) = stream.read(&mut buf).await {
-                let request = String::from_utf8_lossy(&buf[..n]);
-                // Parse ?code=xxx from GET /oauth/callback?code=xxx
-                if let Some(code) = extract_code(&request) {
-                    // Send success response to browser
-                    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
-                        <html><body style='font-family:sans-serif;text-align:center;padding:60px'>\
-                        <h2>✓ Signed in successfully</h2>\
-                        <p>You can close this tab and return to RcloneFlix.</p>\
-                        </body></html>";
-                    let _ = stream.write_all(response.as_bytes()).await;
+        // Accept one connection with timeout (5 minutes)
+        let accept_future = listener.accept();
+        let timeout = Duration::from_secs(300);
+        
+        match tokio::time::timeout(timeout, accept_future).await {
+            Ok(Ok((mut stream, _))) => {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = vec![0u8; 4096];
+                if let Ok(n) = stream.read(&mut buf).await {
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    // Parse ?code=xxx from GET /oauth/callback?code=xxx
+                    if let Some(code) = extract_code(&request) {
+                        // Send success response to browser
+                        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\
+                            <html><body style='font-family:sans-serif;text-align:center;padding:60px'>\
+                            <h2>✓ Signed in successfully</h2>\
+                            <p>You can close this tab and return to RcloneFlix.</p>\
+                            </body></html>";
+                        let _ = stream.write_all(response.as_bytes()).await;
 
-                    // Emit event to frontend
-                    let _ = app_clone.emit("oauth-callback", serde_json::json!({ "code": code }));
-                } else {
-                    let response = "HTTP/1.1 400 Bad Request\r\n\r\nMissing code parameter";
-                    let _ = stream.write_all(response.as_bytes()).await;
+                        // Emit event to frontend
+                        let _ = app_clone.emit("oauth-callback", serde_json::json!({ "code": code }));
+                    } else if request.contains("error=") {
+                        // Handle OAuth errors
+                        let error = extract_error(&request).unwrap_or_else(|| "Unknown OAuth error".to_string());
+                        let response = format!("HTTP/1.1 400 Bad Request\r\n\r\nOAuth error: {}", error);
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = app_clone.emit("oauth-error", serde_json::json!({ "error": error }));
+                    } else {
+                        let response = "HTTP/1.1 400 Bad Request\r\n\r\nMissing code parameter";
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = app_clone.emit("oauth-error", serde_json::json!({ 
+                            "error": "Authorization code not received" 
+                        }));
+                    }
                 }
+            }
+            Ok(Err(e)) => {
+                eprintln!("OAuth callback accept error: {}", e);
+                let _ = app_clone.emit("oauth-error", serde_json::json!({ 
+                    "error": format!("Connection error: {}", e) 
+                }));
+            }
+            Err(_) => {
+                // Timeout
+                let _ = app_clone.emit("oauth-error", serde_json::json!({ 
+                    "error": "OAuth timeout - please try again" 
+                }));
             }
         }
     });
@@ -85,6 +115,20 @@ fn extract_code(request: &str) -> Option<String> {
         let mut parts = param.splitn(2, '=');
         if parts.next() == Some("code") {
             return parts.next().map(|s| s.to_string());
+        }
+    }
+    None
+}
+
+/// Extract OAuth error from request query string
+fn extract_error(request: &str) -> Option<String> {
+    let line = request.lines().next()?;
+    let path = line.split_whitespace().nth(1)?;
+    let query = path.split('?').nth(1)?;
+    for param in query.split('&') {
+        let mut parts = param.splitn(2, '=');
+        if parts.next() == Some("error") {
+            return parts.next().map(|s| s.replace('+', " "));
         }
     }
     None

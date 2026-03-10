@@ -63,10 +63,19 @@ export function AudioMiniPlayer({ playlist, playlistIndex: initialIndex, onClose
   // Cleanup all temp files on unmount
   useEffect(() => {
     return () => {
-      audioRef.current?.pause();
-      cachedUrls.current.forEach((_, trackId) => {
-        invoke("cleanup_book_temp", { sessionId: `audio-${trackId}` }).catch(() => {});
-      });
+      // Stop playback first before cleaning up files
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = "";
+        audioRef.current.load(); // Force release of resources
+        audioRef.current = null;
+      }
+      // Clean up temp files after a short delay to ensure audio is stopped
+      setTimeout(() => {
+        cachedUrls.current.forEach((_, trackId) => {
+          invoke("cleanup_book_temp", { sessionId: `audio-${trackId}` }).catch(() => {});
+        });
+      }, 100);
     };
   }, []);
 

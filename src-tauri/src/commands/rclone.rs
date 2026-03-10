@@ -173,20 +173,66 @@ pub async fn get_rclone_version(app: AppHandle) -> Result<String, String> {
 
 /// Start rclone serve http for a remote path and return the local URL.
 /// This is used for streaming video/audio via libVLC.
-/// NOTE: In Stage 3 this will be expanded with proper process lifecycle management.
+/// Spins up a dedicated rclone serve http process and returns the local URL.
 #[tauri::command]
 pub async fn get_stream_url(
     app: AppHandle,
     config_path: String,
     remote_path: String,
 ) -> Result<String, String> {
-    // For now, return a rclone serve URL placeholder
-    // Stage 3 will implement actual process spawning + port management
-    let port = 8765u16;
-    let url = format!("http://localhost:{}/{}", port, remote_path);
+    let rclone = rclone_binary(&app);
+    
+    // Pick an available port with retry logic
+    let mut last_error = None;
+    for _ in 0..3 {
+        let port = portpicker::pick_unused_port().ok_or("No available port")?;
+        
+        // Parse remote path to get root and sub-path
+        let (remote_name, sub_path) = parse_remote_root(&remote_path);
+        let remote_root = format!("{}:{}", remote_name, 
+            if sub_path.starts_with('/') { &sub_path[1..] } else { &sub_path });
+        
+        let _ = app.emit(
+            "rclone:status",
+            serde_json::json!({ "state": "starting", "message": "Starting stream server…" }),
+        );
 
-    // TODO Stage 3: spawn rclone serve http --config {config_path} {remote} --addr :{port}
-    let _ = (app, config_path, remote_path, port);
+        let mut child = Command::new(&rclone)
+            .args([
+                "serve", "http",
+                "--config", &config_path,
+                "--addr", &format!("127.0.0.1:{}", port),
+                "--read-only",
+                "--no-checksum",
+                "--allow-origin", "*",
+                &remote_root,
+            ])
+            .spawn()
+            .map_err(|e| format!("Failed to start rclone serve: {}", e))?;
 
-    Ok(url)
+        // Wait for server to be ready
+        match wait_for_port(port).await {
+            Ok(()) => {
+                // Keep child process alive by letting it run in background
+                // Note: caller is responsible for stopping this when done
+                let _ = app.emit(
+                    "rclone:status",
+                    serde_json::json!({ "state": "ready", "message": "Stream ready" }),
+                );
+                
+                // Build URL - the file path within the served root
+                let file_name = remote_path.rsplit('/').next().unwrap_or(&remote_path);
+                let encoded = percent_encode_path(file_name);
+                return Ok(format!("http://127.0.0.1:{}/{}", port, encoded));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                last_error = Some(e);
+                // Try again with a different port
+                continue;
+            }
+        }
+    }
+    
+    Err(last_error.unwrap_or_else(|| "Failed to start stream server".to_string()))
 }

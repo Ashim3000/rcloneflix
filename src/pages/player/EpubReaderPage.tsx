@@ -119,8 +119,16 @@ export function EpubReaderPage() {
 
     return () => {
       renditionRef.current = null;
-      rendition.destroy();
-      book.destroy();
+      try {
+        rendition.destroy();
+      } catch {
+        // Some versions of epubjs don't have destroy
+      }
+      try {
+        book.destroy();
+      } catch {
+        // Some versions of epubjs don't have destroy
+      }
     };
   }, [streamUrl]);
 

@@ -137,6 +137,8 @@ async function fetchTmdbTv(showTitle: string, season: number | undefined, episod
 
 async function fetchMusicBrainz(title: string): Promise<Partial<MediaItem>> {
   try {
+    // MusicBrainz requires 1 second between requests
+    await new Promise((r) => setTimeout(r, 1000));
     const resp = await fetch(
       `https://musicbrainz.org/ws/2/recording?query=${encodeURIComponent(title)}&limit=1&fmt=json`,
       { headers: { "User-Agent": "RcloneFlix/0.1 (https://github.com/Ashim3000/rcloneflix)" } }
@@ -176,6 +178,8 @@ async function fetchMusicBrainz(title: string): Promise<Partial<MediaItem>> {
 
 async function fetchOpenLibrary(title: string): Promise<Partial<MediaItem>> {
   try {
+    // OpenLibrary has no strict rate limit but we should be polite
+    await new Promise((r) => setTimeout(r, 200));
     const resp = await fetch(
       `https://openlibrary.org/search.json?q=${encodeURIComponent(title)}&limit=1`
     );
