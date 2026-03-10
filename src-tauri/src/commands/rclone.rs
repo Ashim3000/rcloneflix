@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use tauri::AppHandle;
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager};
 use crate::commands::player::{parse_remote_root, percent_encode_path, wait_for_port};
 
 // Global storage for the rclone serve child process (so it doesn't get dropped)
