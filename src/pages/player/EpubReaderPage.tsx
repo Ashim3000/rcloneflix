@@ -5,10 +5,12 @@ import { ChevronLeft, ChevronRight, ArrowLeft, Type, BookOpen } from "lucide-rea
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import type { MediaItem } from "../../store/appStore";
 import { useAppStore } from "../../store/appStore";
-import * as EpubModule from "epubjs";
 
-// epubjs uses CJS `export =` without a default export; cast here so the rest
-// of the file stays type-safe without requiring esModuleInterop in tsconfig.
+// epubjs is loaded dynamically to avoid bundling issues
+// Use the global ePub from the script tag
+import ePub from "epubjs";
+
+// Type definitions for epubjs
 interface EpubRendition {
   display(cfi?: string): Promise<void>;
   next(): Promise<void>;
@@ -25,7 +27,6 @@ interface EpubBook {
   renderTo(el: Element, options?: Record<string, unknown>): EpubRendition;
   destroy(): void;
 }
-const Epub = EpubModule as unknown as (url: string) => EpubBook;
 
 type ReaderSettings = {
   fontSize: number;
@@ -90,13 +91,14 @@ export function EpubReaderPage() {
     let rendition: EpubRendition;
     
     try {
-      book = Epub(streamUrl);
+      book = ePub(streamUrl) as EpubBook;
       rendition = book.renderTo(containerRef.current!, {
         width: "100%",
         height: "100%",
         spread: "none",
       });
     } catch (e) {
+      console.error("EPUB load error:", e);
       setError(`Failed to load EPUB: ${e}`);
       setLoading(false);
       return;

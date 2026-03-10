@@ -170,6 +170,7 @@ export function AudioMiniPlayer({ playlist, playlistIndex: initialIndex, onClose
       audio.removeEventListener("play",           onPlay);
       audio.removeEventListener("pause",          onPause);
       audio.removeEventListener("ended",          onEnded);
+      audio.removeEventListener("error",          onError);
     };
   }, [currentUrl]);
 
