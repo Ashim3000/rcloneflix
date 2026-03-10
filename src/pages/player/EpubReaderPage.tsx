@@ -87,19 +87,29 @@ export function EpubReaderPage() {
   useEffect(() => {
     if (!streamUrl || !containerRef.current) return;
 
+    console.log("Initializing EPUB with URL:", streamUrl);
+    
     let book: EpubBook;
     let rendition: EpubRendition;
     
     try {
       book = ePub(streamUrl) as EpubBook;
+      
+      // Add error handler to book
+      book.on('error', (err: any) => {
+        console.error('EPUB book error:', err);
+        setError(`EPUB error: ${err}`);
+        setLoading(false);
+      });
+      
       rendition = book.renderTo(containerRef.current!, {
         width: "100%",
         height: "100%",
         spread: "none",
       });
     } catch (e) {
-      console.error("EPUB load error:", e);
-      setError(`Failed to load EPUB: ${e}`);
+      console.error("EPUB initialization error:", e);
+      setError(`Failed to initialize EPUB: ${e}`);
       setLoading(false);
       return;
     }
@@ -120,11 +130,28 @@ export function EpubReaderPage() {
     rendition.themes.select(settings.theme);
     rendition.themes.fontSize(`${settings.fontSize}px`);
 
-    // Restore position
+    // Restore position with timeout
     const existing = watchProgress[item.id];
+    console.log("Displaying EPUB at CFI:", existing?.cfi);
+    
+    const timeoutId = setTimeout(() => {
+      console.error("EPUB display timeout");
+      setError("EPUB loading timed out - check console for errors");
+      setLoading(false);
+    }, 10000);
+    
     rendition.display(existing?.cfi ?? undefined)
-      .then(() => setLoading(false))
-      .catch(() => setLoading(false));
+      .then(() => {
+        clearTimeout(timeoutId);
+        console.log("EPUB displayed successfully");
+        setLoading(false);
+      })
+      .catch((e: any) => {
+        clearTimeout(timeoutId);
+        console.error("EPUB display error:", e);
+        setError(`Failed to display EPUB: ${e}`);
+        setLoading(false);
+      });
 
     // Save position on page turn
     rendition.on("relocated", (loc: EpubLocation) => {

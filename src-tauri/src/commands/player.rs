@@ -586,8 +586,8 @@ pub async fn stop_all_sessions(vlc: State<'_, VlcManager>) -> Result<(), String>
 // ── Book download (epub / pdf) ────────────────────────────────────────────────
 
 /// Download an epub or pdf to a per-session temp directory and return a
-/// `file://` URL. Falls back to a FUSE mount path immediately if one is
-/// already mounted — no download needed in that case.
+/// local file path. Always downloads to temp (even with FUSE mount) because
+/// the asset protocol only allows access to $TEMP/** paths.
 ///
 /// Prefer this over `start_stream_session` for books: rclone copyto is a
 /// single download that exits cleanly, whereas rclone serve http keeps an
@@ -599,14 +599,8 @@ pub async fn download_book_to_temp(
     remote_path: String,   // full path, e.g. "gdrive:/Books/Author/book.epub"
     session_id: String,
 ) -> Result<String, String> {
-    // 1. FUSE fast-path (zero copy, works offline)
-    let (remote_name, sub_path) = parse_remote_root(&remote_path);
-    let sub_path = sub_path.trim_start_matches('/');
-    if let Some(local_path) = find_fuse_local_path(remote_name, sub_path) {
-        return Ok(local_path.to_string_lossy().into_owned());
-    }
-
-    // 2. Download via rclone copyto
+    // Always download to temp - asset protocol only allows $TEMP/** scope
+    // FUSE paths outside /tmp won't work with convertFileSrc
     let filename = remote_path
         .rsplit('/')
         .find(|s| !s.is_empty() && !s.ends_with(':'))
@@ -621,6 +615,8 @@ pub async fn download_book_to_temp(
     let local_path = temp_dir.join(filename);
     let rclone = rclone_binary(&app);
 
+    eprintln!("Downloading book: {} -> {:?}", remote_path, local_path);
+    
     let output = TokioCommand::new(&rclone)
         .args([
             "copyto",
@@ -635,9 +631,11 @@ pub async fn download_book_to_temp(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("rclone copyto error: {}", stderr);
         return Err(format!("rclone copyto error: {}", stderr));
     }
 
+    eprintln!("Book download complete: {:?}", local_path);
     Ok(local_path.to_string_lossy().into_owned())
 }
 
