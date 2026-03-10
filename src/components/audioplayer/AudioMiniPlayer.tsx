@@ -119,18 +119,25 @@ export function AudioMiniPlayer({ playlist, playlistIndex: initialIndex, onClose
   useEffect(() => {
     if (!currentUrl || !currentTrack) return;
 
+    console.log("Audio URL ready:", currentUrl);
+
     if (!audioRef.current) audioRef.current = new Audio();
     const audio = audioRef.current;
     audio.src = currentUrl;
     audio.volume = muted ? 0 : volume;
     
     const onError = (e: Event) => {
-      console.error("Audio playback error:", e);
-      setError("Playback failed - check console for details");
+      const audioEl = e.target as HTMLAudioElement;
+      console.error("Audio playback error:", e, "Error code:", audioEl.error?.code, "Message:", audioEl.error?.message);
+      setError(`Playback failed: ${audioEl.error?.message || 'Unknown error'}`);
     };
     audio.addEventListener("error", onError);
     
-    audio.play().then(() => setPlaying(true)).catch((e) => {
+    console.log("Starting audio playback...");
+    audio.play().then(() => {
+      console.log("Audio playback started");
+      setPlaying(true);
+    }).catch((e) => {
       console.error("Audio play failed:", e);
       setError(`Playback failed: ${e.message}`);
     });
