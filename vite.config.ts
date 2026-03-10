@@ -11,4 +11,18 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  build: {
+    // Ensure pdf worker is included in the bundle
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          pdfjs: ['pdfjs-dist'],
+        },
+      },
+    },
+  },
+  // Optimize dependencies that might cause issues in production
+  optimizeDeps: {
+    include: ['epubjs', 'pdfjs-dist'],
+  },
 }));
