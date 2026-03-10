@@ -9,11 +9,6 @@
     "fs:default",
     "store:default",
     "shell:default",
-    "http:default",
-    "asset:allow-scope",
-    {
-      "identifier": "asset:scope",
-      "allow": ["$TEMP/rcloneflix-books/**"]
-    }
+    "http:default"
   ]
 }
