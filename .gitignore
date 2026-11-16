@@ -1,0 +1,46 @@
+# Local environment variables & cookies (never commit credentials)
+.env
+.env.local
+.env.*.local
+cookies.txt
+
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build output
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# Cargo.lock is intentionally tracked for reproducible builds (this is an app, not a library)
+
+# Bundled rclone binary (76 MB) — referenced by tauri.conf.json "resources".
+# Fetch before building: see SETUP.md "Fetching the bundled rclone binary".
+src-tauri/rclone
+src-tauri/rclone.exe
+src-tauri/windows-sdk/
+src-tauri/libvlc.dll
+src-tauri/libvlccore.dll
+src-tauri/plugins/
+*.deb
+*.flatpak
+*.exe
+.flatpak-builder/
+flatpak/build-dir/
+flatpak/repo/
+
+
+# Android release signing — never commit the keystore or its passwords
+android/key.properties
+*.jks
+*.keystore
+
+# Android build artifacts & bundled native libs (librclone.so ~68MB/ABI —
+# backed up separately alongside the keystore; required at android/app/src/main/jniLibs/ to build)
+android/app/build/
+android/.gradle/
+android/app/src/main/jniLibs/
+android/app/release/
+*.apk
+*.aab

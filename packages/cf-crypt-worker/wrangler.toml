@@ -1,0 +1,6 @@
+name = "rcloneflix-crypt-stream"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+# Before deploying, set your 64-character hex master key (32 bytes):
+# npx wrangler secret put MASTER_KEY_HEX

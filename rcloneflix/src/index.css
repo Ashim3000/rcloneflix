@@ -1,0 +1,107 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html, body, #root {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    background-color: #080A0F;
+    color: #C8D0DC;
+    font-family: 'DM Sans', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2A3347;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #8892A4;
+  }
+
+  /* Selection */
+  ::selection {
+    background: rgba(232, 160, 32, 0.3);
+    color: #EEF2F8;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-accent hover:bg-accent-glow text-void font-body font-semibold px-6 py-3 rounded-lg transition-all duration-200 hover:shadow-accent-glow active:scale-95;
+  }
+
+  .btn-secondary {
+    @apply bg-panel hover:bg-muted text-text border border-border hover:border-subtle font-body font-medium px-6 py-3 rounded-lg transition-all duration-200 active:scale-95;
+  }
+
+  .btn-ghost {
+    @apply text-subtle hover:text-text font-body font-medium px-4 py-2 rounded-lg transition-all duration-200 hover:bg-panel active:scale-95;
+  }
+
+  .input-field {
+    @apply w-full bg-panel border border-border hover:border-subtle focus:border-accent text-text placeholder-subtle rounded-lg px-4 py-3 font-body text-sm outline-none transition-all duration-200 focus:shadow-accent-glow;
+  }
+
+  .card {
+    @apply bg-panel border border-border rounded-xl overflow-hidden transition-all duration-300 hover:border-muted hover:shadow-card-hover;
+  }
+
+  .step-indicator {
+    @apply w-8 h-8 rounded-full flex items-center justify-center text-xs font-body font-semibold transition-all duration-300;
+  }
+
+  .sidebar-item {
+    @apply flex items-center gap-3 px-4 py-3 rounded-lg text-subtle hover:text-text hover:bg-panel transition-all duration-200 cursor-pointer font-body font-medium text-sm;
+  }
+
+  .sidebar-item.active {
+    @apply text-accent bg-panel border-l-2 border-accent;
+  }
+}
+
+/* Noise overlay on main bg */
+.bg-noise::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* Glow scanline effect for cinematic feel */
+.scanlines::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.03) 2px,
+    rgba(0,0,0,0.03) 4px
+  );
+  pointer-events: none;
+  z-index: 1;
+}

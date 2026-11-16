@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
+    <!-- Deep Cinema Void Background -->
+    <path
+        android:fillColor="#080A0F"
+        android:pathData="M0,0h320v180h-320z" />
+
+    <!-- Subtle Top & Bottom Accent Frame Bars -->
+    <path
+        android:fillColor="#E8A020"
+        android:pathData="M0,0h320v4h-320z" />
+    <path
+        android:fillColor="#E8A020"
+        android:pathData="M0,176h320v4h-320z" />
+
+    <!-- Inner Card Panel -->
+    <path
+        android:fillColor="#141820"
+        android:pathData="M24,24h272v132h-272z" />
+
+    <!-- Amber Gold Play Emblem Badge -->
+    <path
+        android:fillColor="#E8A020"
+        android:pathData="M70,54h72v72h-72z" />
+    <path
+        android:fillColor="#080A0F"
+        android:pathData="M94,72L94,108L124,90Z" />
+
+    <!-- Stylized RCLONEFLIX Typography Bars / Stream Lines -->
+    <path
+        android:fillColor="#EEF2F8"
+        android:pathData="M160,66h96v12h-96z" />
+    <path
+        android:fillColor="#E8A020"
+        android:pathData="M160,86h76v8h-76z" />
+    <path
+        android:fillColor="#1EC8A0"
+        android:pathData="M160,102h56v8h-56z" />
+</vector>

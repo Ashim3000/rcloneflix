@@ -1,0 +1,37 @@
+app-id: com.rcloneflix.desktop
+runtime: org.gnome.Platform
+runtime-version: '45'
+sdk: org.gnome.Sdk
+command: rcloneflix
+
+finish-args:
+  - --share=ipc
+  - --socket=x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --share=network
+  - --device=dri
+  - --filesystem=home
+  - --filesystem=host
+  - --talk-name=org.freedesktop.Notifications
+
+modules:
+  - name: rcloneflix
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 rcloneflix /app/bin/rcloneflix
+      - install -Dm755 rclone /app/bin/rclone
+      - install -Dm755 alist /app/bin/alist
+      - install -Dm644 com.rcloneflix.desktop.desktop /app/share/applications/com.rcloneflix.desktop.desktop
+      - install -Dm644 com.rcloneflix.desktop.png /app/share/icons/hicolor/256x256/apps/com.rcloneflix.desktop.png
+    sources:
+      - type: file
+        path: ../src-tauri/target/release/rcloneflix
+      - type: file
+        path: /usr/bin/rclone
+      - type: file
+        path: ../src-tauri/alist
+      - type: file
+        path: com.rcloneflix.desktop.desktop
+      - type: file
+        path: com.rcloneflix.desktop.png

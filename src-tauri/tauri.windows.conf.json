@@ -1,0 +1,14 @@
+{
+  "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "resources": [
+      "rclone.exe",
+      "alist.exe",
+      "libvlc.dll",
+      "libvlccore.dll",
+      "plugins/**/*"
+    ]
+  }
+}

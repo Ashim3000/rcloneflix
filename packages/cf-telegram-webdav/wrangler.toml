@@ -1,0 +1,13 @@
+name = "rcloneflix-telegram-webdav"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat", "no_handle_cross_request_promise_resolution"]
+
+# Required secrets (set via `npx wrangler secret put <NAME>`):
+# TG_API_ID          - Telegram App api_id (integer string, e.g. "12345678")
+# TG_API_HASH        - Telegram App api_hash (32-char hex)
+# TG_STRING_SESSION  - Telethon / GramJS StringSession for the user/bot account
+# TG_DEFAULT_CHAT_ID - Default Telegram channel/supergroup ID (e.g. "-1003872024113")
+# WEBDAV_USER        - Username for Rclone WebDAV Basic Auth
+# WEBDAV_PASS        - Password for Rclone WebDAV Basic Auth
+# MASTER_KEY_HEX     - 64-char hex key (32 bytes) for signing /stream?token= direct links
