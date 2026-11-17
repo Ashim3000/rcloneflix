@@ -681,7 +681,9 @@ jobs:
                           os.remove(local_out)
 
                   else:
-                      subprocess.run(["rclone", "move", local_out, safe_dest, "-v"], check=True)
+                      # moveto, not move: local staging name is out_{idx}.mp4, so the
+                      # final filename must be reasserted via the full destination path
+                      subprocess.run(["rclone", "moveto", local_out, dest_target, "-v"], check=True)
                       verify = subprocess.run(["rclone", "lsf", dest_target], capture_output=True, text=True)
                       upload_successful = (verify.returncode == 0 and out_name in verify.stdout)
 

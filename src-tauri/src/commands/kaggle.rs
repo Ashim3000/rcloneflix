@@ -830,9 +830,11 @@ for idx, source_str in enumerate(expanded_queue, 1):
 
     else:
         print(f"🔒 Uploading to {{target_remote_file}} via Rclone...")
+        # moveto, not move: local staging name is out_{{idx}}.mp4, so the final
+        # filename must be reasserted by targeting the full destination path
         upload_res = subprocess.run([
-            "rclone", "move", local_temp_output, safe_dest_folder,
-            "-P", "--transfers", "2", "--checkers", "4", "--retries", "5", "--low-level-retries", "10", "--timeout", "120s"
+            "rclone", "moveto", local_temp_output, target_remote_file,
+            "-P", "--retries", "5", "--low-level-retries", "10", "--timeout", "120s"
         ])
 
         if upload_res.returncode == 0:

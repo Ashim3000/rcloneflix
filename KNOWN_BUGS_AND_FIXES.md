@@ -2802,6 +2802,16 @@ The following items (100–125) were identified during the comprehensive v0.9.76
 
 ---
 
+### 174. RESOLVED — Cloud Transcode Outputs Land as `out_1.mp4` on Rclone Destinations (v1.0.32-dev)
+* **Platform:** Cloud Workers (`src-tauri/src/commands/kaggle.rs`, `.github/workflows/cloud_worker.yml`)
+* **Root Cause:** The `out_{idx}.mp4` staging scheme from item #168 scrubbed special characters by transcoding to a neutral local filename, intending to reassert the real `output_filename` at upload. The Telegram (MTProto `DocumentAttributeFilename` / Bot API multipart) and Streamtape (multipart tuple) paths did reassert it — but the plain rclone path ran `rclone move <staging file> <dest folder>`, and `move` into a directory preserves the source filename. Result: remotes received `out_1.mp4`, the follow-up `rclone lsf <intended name>` verification failed, and the "Safeguard: Could not verify" warning fired on every successful transcode (source never deleted). `androidPolyfill.ts` was unaffected — it never adopted the staging scheme and names its temp file with the final `output_filename` directly.
+* **Resolution:**
+  - `kaggle.rs`: upload now uses `rclone moveto local_temp_output target_remote_file`, renaming to the intended filename during the move.
+  - `cloud_worker.yml`: same change — `rclone moveto local_out dest_target` (must also be pushed to the live worker repo for GHA jobs to pick it up).
+* **Status:** `RESOLVED` (v1.0.32-dev)
+
+---
+
 *Document updated: 13 November 2026 — Version 1.0.3: Comprehensive Remediation & Multi-Platform Packaging Release (All Items Resolved & Packaged Across Linux Deb, Flatpak, Windows NSIS, Universal Android APK & Android TV APK)*
 
 
