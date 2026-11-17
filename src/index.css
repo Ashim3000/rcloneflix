@@ -365,3 +365,16 @@ body.is-android-tv .tv-focused .group-hover\:opacity-100 {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
 }
+
+/* ── Android Music Skin compact mode ─────────────────────────────────────────
+   The window itself cannot resize on Android; these classes (toggled by
+   useMusicSkinWindow) keep the skin flush to the viewport and stop background
+   scroll-through while it is active. */
+html.android-music-skin-compact,
+html.android-music-skin-compact body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+body.music-skin-mode-active {
+  touch-action: manipulation;
+}

@@ -2812,6 +2812,47 @@ The following items (100–125) were identified during the comprehensive v0.9.76
 
 ---
 
+### 175. RESOLVED — MovieBite DirectPlay Discovery 403s Swallowed & Desktop Search Missing (v1.0.31-post)
+* **Platform:** Desktop (`src-tauri/src/commands/stream_ingest.rs`) & Android (`src/lib/androidPolyfill.ts`)
+* **Root Cause:** MovieBite's `/api/*` endpoints require `X-MovieBite-Client: 1` and `Origin: https://moviebite.org`, returning `403 {"success":false,"error":"Forbidden"}` otherwise. Neither `stream_ingest.rs` nor `androidPolyfill.ts` sent those headers on discovery requests, and `stream_ingest.rs` ignored non-2xx statuses and `json["error"]` (returning an empty `releases: []` feed silently). Additionally, the Rust MovieBite branch ignored `?s=`/`?q=`/`?query=` and always hit `/api/trending`.
+* **Resolution:**
+  - `stream_ingest.rs`: Added `mb_query` extraction (`?s=`/`?q=`/`?query=`) routing to `/api/search?q=`, added `X-MovieBite-Client: 1` and `Origin: https://moviebite.org`, and surfaced HTTP non-2xx, `json["success"] == false`, `json["error"]`, and missing `results` array errors.
+  - `androidPolyfill.ts`: Added `X-MovieBite-Client: 1` and `Origin: https://moviebite.org` to `crawl_website_releases` MovieBite requests and rethrew MovieBite HTTP/API errors instead of swallowing them.
+* **Status:** `RESOLVED` (v1.0.31-post)
+
+---
+
+### 176. RESOLVED — ReadComicsOnline & MangaDex DirectPlay Comics Portal Missing on Android (v1.0.31-post)
+* **Platform:** Android (`src/lib/androidPolyfill.ts`)
+* **Root Cause:** `search_comics_portal`, `extract_comic_issue_pages`, and `readcomicsonline`/`mangadex` series drill-down in `crawl_website_releases` were only implemented in Rust (`stream_ingest.rs`); on Android, `androidPolyfill.ts` fell through to `return null;`.
+* **Resolution:**
+  - Added `searchComicsPortalAndroid` (ReadComicsOnline autocomplete, Archive.org CBZ search, and MangaDex public API) and wired `search_comics_portal`.
+  - Added `extract_comic_issue_pages` (MangaDex at-home chapters + ReadComicsOnline issue image extraction) and `readcomicsonline` / `mangadex` series drill-down inside `crawl_website_releases`.
+* **Status:** `RESOLVED` (v1.0.31-post)
+
+---
+
+### 177. RESOLVED — Android Media Downloads Missing Progress, Error Checks, Subfolders, & Offline Lookup (v1.0.31-post)
+* **Platform:** Android (`android/app/src/main/java/com/rcloneflix/app/MainActivity.java`, `src/lib/androidPolyfill.ts`)
+* **Root Cause:** `start_download` and `start_folder_download` saved flat to `/sdcard/Download/`, ignored `parsed.ok` and `subfolder`, omitted `download-progress` events, lacked a header-aware HTTP downloader for DirectPlay URLs, `open_download_folder` was a no-op, and `find_downloaded_file` always returned `null`.
+* **Resolution:**
+  - `MainActivity.java`: Added `@JavascriptInterface statLocalFile`, `@JavascriptInterface openDownloadsFolder`, `httpDownloadToFile`, and the `"httpDownload"` branch in `runAsyncTask`.
+  - `androidPolyfill.ts`: Updated `start_download` and `start_folder_download` to save under `/sdcard/Download/RcloneFlix/<subfolder>/`, emit `download-progress` events matching `downloadManager.ts`, throw on `parsed.ok === false` or missing storage permission, route HTTP/HTTPS URLs through `httpDownload`, wire `open_download_folder` to `bridge.openDownloadsFolder()`, and implement `find_downloaded_file` via `bridge.statLocalFile()`.
+* **Status:** `RESOLVED` (v1.0.31-post)
+
+---
+
+### 178. RESOLVED — Music Player Mode Window Resizing Failing on `.deb` (Maximized) & Android (v1.0.31-post)
+* **Platform:** Desktop Linux `.deb` (`src-tauri/capabilities/default.json`, `src/lib/useMusicSkinWindow.ts`) & Android (`src/lib/useMusicSkinWindow.ts`, `src/index.css`)
+* **Root Cause:** Tauri v2 ACL rejected `win.isMaximized()` and `win.unmaximize()` because `core:window:allow-is-maximized`, `core:window:allow-unmaximize`, and `core:window:allow-maximize` were missing from `capabilities/default.json`; `.catch(() => false)` masked the rejection so GTK/Wayland ignored `setSize(380, 640)` on a maximized window. On Android, `useMusicSkinWindow.ts` called a nonexistent `bridge.enterPictureInPicture()` method, and `android-music-skin-compact` / `music-skin-mode-active` had no CSS rules.
+* **Resolution:**
+  - `capabilities/default.json`: Added `core:window:allow-is-maximized`, `core:window:allow-unmaximize`, and `core:window:allow-maximize`.
+  - `useMusicSkinWindow.ts`: Tracked `wasMaximizedRef`, added a 120 ms compositor settle delay after `unmaximize()`, restored `win.maximize()` on exit when previously maximized, and removed the dead `enterPictureInPicture()` call.
+  - `src/index.css`: Added viewport lock & `touch-action` rules for `html.android-music-skin-compact` and `body.music-skin-mode-active`.
+* **Status:** `RESOLVED` (v1.0.31-post)
+
+---
+
 *Document updated: 13 November 2026 — Version 1.0.3: Comprehensive Remediation & Multi-Platform Packaging Release (All Items Resolved & Packaged Across Linux Deb, Flatpak, Windows NSIS, Universal Android APK & Android TV APK)*
 
 

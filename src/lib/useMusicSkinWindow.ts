@@ -19,6 +19,7 @@ export function useMusicSkinWindow() {
   } = useAppStore();
 
   const wasInSkinModeRef = useRef(false);
+  const wasMaximizedRef = useRef(false);
 
   useEffect(() => {
     if (isAndroid) {
@@ -26,14 +27,9 @@ export function useMusicSkinWindow() {
         wasInSkinModeRef.current = true;
         document.documentElement.classList.add("android-music-skin-compact");
         document.body.classList.add("music-skin-mode-active");
-        const bridge = (window as any).AndroidBridge;
-        if (bridge && typeof bridge.enterPictureInPicture === "function") {
-          try {
-            bridge.enterPictureInPicture();
-          } catch (e) {
-            console.warn("Could not trigger Android PiP for music skin:", e);
-          }
-        }
+        // Android windows cannot be resized; compact mode is CSS-only via the
+        // classes above. (bridge.enterPictureInPicture never existed — the real
+        // bridge method is enterPip(w, h), and PiP is wrong for a music skin.)
       } else if (wasInSkinModeRef.current) {
         wasInSkinModeRef.current = false;
         document.documentElement.classList.remove("android-music-skin-compact");
@@ -59,8 +55,12 @@ export function useMusicSkinWindow() {
           }
 
           const isMax = await win.isMaximized().catch(() => false);
+          wasMaximizedRef.current = isMax;
           if (isMax) {
             await win.unmaximize().catch(() => {});
+            // GTK/Wayland/Sommelier completes unmaximize asynchronously in the
+            // compositor; without a settle delay the setSize below is overridden.
+            await new Promise((r) => setTimeout(r, 120));
           }
 
           // 2. Capture current full-app window bounds before shrinking (only if not already compact)
@@ -90,7 +90,11 @@ export function useMusicSkinWindow() {
           await win.setAlwaysOnTop(false).catch(() => {});
           await win.setMinSize(new LogicalSize(900, 600)).catch(() => {});
 
-          if (prevWindowBounds) {
+          if (wasMaximizedRef.current) {
+            wasMaximizedRef.current = false;
+            await win.maximize().catch(() => {});
+            setPrevWindowBounds(null);
+          } else if (prevWindowBounds) {
             await win
               .setSize(new LogicalSize(prevWindowBounds.width, prevWindowBounds.height))
               .catch(() => {});

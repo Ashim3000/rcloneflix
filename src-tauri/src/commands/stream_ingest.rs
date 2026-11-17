@@ -3720,20 +3720,54 @@ pub async fn crawl_website_releases(url: String) -> Result<SiteDiscoveryFeed, St
             }
         }
 
-        let trending_url = "https://moviebite.org/api/trending";
+        // Desktop search lands here as moviebite.org/?s=<query> (DirectPlayPage generic
+        // fallback). MovieBite requires X-MovieBite-Client on /api/* or it returns
+        // 403 {"success":false,"error":"Forbidden"} — which previously parsed into an
+        // empty feed with no error surfaced.
+        let mb_query: Option<String> = parsed_url
+            .query_pairs()
+            .find(|(k, _)| k == "s" || k == "q" || k == "query")
+            .map(|(_, v)| v.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let api_url = match &mb_query {
+            Some(q) => format!(
+                "https://moviebite.org/api/search?q={}",
+                percent_encoding::utf8_percent_encode(q, percent_encoding::NON_ALPHANUMERIC)
+            ),
+            None => "https://moviebite.org/api/trending".to_string(),
+        };
+
         let resp = client
-            .get(trending_url)
+            .get(&api_url)
+            .header("Accept", "application/json")
+            .header("X-MovieBite-Client", "1")
+            .header("Origin", "https://moviebite.org")
             .header("Referer", "https://moviebite.org/")
             .send()
             .await
             .map_err(|e| format!("Failed to contact MovieBite: {}", e))?;
 
+        let status = resp.status();
         let text = resp
             .text()
             .await
             .map_err(|e| format!("Failed to read MovieBite response: {}", e))?;
+        if !status.is_success() {
+            return Err(format!(
+                "MovieBite API returned HTTP {}: {}",
+                status,
+                text.chars().take(200).collect::<String>()
+            ));
+        }
         let json: serde_json::Value = serde_json::from_str(&text)
             .map_err(|e| format!("Invalid MovieBite JSON: {}", e))?;
+        if json["success"].as_bool() == Some(false) || json["error"].is_string() {
+            return Err(format!(
+                "MovieBite API error: {}",
+                json["error"].as_str().unwrap_or("unknown upstream error")
+            ));
+        }
 
         let mut releases = Vec::new();
         if let Some(results) = json["results"].as_array() {
@@ -3777,9 +3811,15 @@ pub async fn crawl_website_releases(url: String) -> Result<SiteDiscoveryFeed, St
             }
         }
 
+        if releases.is_empty() && !json["results"].is_array() {
+            return Err("MovieBite returned no results array (API may have changed)".to_string());
+        }
         return Ok(SiteDiscoveryFeed {
             site_url: trimmed,
-            site_title: "MovieBite Trending Releases".to_string(),
+            site_title: match &mb_query {
+                Some(q) => format!("MovieBite: \"{}\"", q),
+                None => "MovieBite Trending Releases".to_string(),
+            },
             releases,
         });
     }

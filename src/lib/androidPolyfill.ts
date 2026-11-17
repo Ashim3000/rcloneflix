@@ -399,6 +399,108 @@ async function polyfillFetchText(
   }
 }
 
+/** Android port of Rust search_comics_portal (stream_ingest.rs:4448):
+ *  ReadComicsOnline autocomplete + Archive.org CBZ + MangaDex API. */
+async function searchComicsPortalAndroid(query: string): Promise<any> {
+  const cleanQ = query.trim();
+  const releases: any[] = [];
+
+  // 1. ReadComicsOnline JSON autocomplete search
+  if (cleanQ) {
+    const rcoResp = await polyfillFetchText(
+      `https://readcomicsonline.ru/search?query=${encodeURIComponent(cleanQ)}`,
+      { "X-Requested-With": "XMLHttpRequest", Referer: "https://readcomicsonline.ru/" }
+    );
+    if (rcoResp.ok && rcoResp.body) {
+      try {
+        const json = JSON.parse(rcoResp.body);
+        for (const item of json?.suggestions || []) {
+          const title = String(item?.value || "").trim();
+          const slug = String(item?.data || "").trim();
+          if (title && slug) {
+            releases.push({
+              title,
+              post_url: `https://readcomicsonline.ru/comic/${slug}`,
+              thumbnail: `https://readcomicsonline.ru/uploads/manga/${slug}/cover/cover_250x350.jpg`,
+              date: null,
+              site_domain: "readcomicsonline.ru",
+              media_type: "comic_series",
+              season: null,
+              episode: null,
+            });
+          }
+        }
+      } catch {}
+    }
+  }
+
+  // 2. Internet Archive direct CBZ comics
+  const iaTerm = cleanQ
+    ? `title:(${cleanQ}) AND mediatype:texts AND (format:"Comic Book ZIP" OR subject:comics)`
+    : `subject:(comics OR "comic book" OR marvel OR dc) AND format:(Comic Book ZIP)`;
+  const iaSort = cleanQ ? "downloads+desc" : "publicdate+desc";
+  const iaResp = await polyfillFetchText(
+    `https://archive.org/advancedsearch.php?q=${encodeURIComponent(iaTerm)}&fl[]=identifier,title,year&sort[]=${iaSort}&rows=24&output=json`
+  );
+  if (iaResp.ok && iaResp.body) {
+    try {
+      const json = JSON.parse(iaResp.body);
+      for (const doc of json?.response?.docs || []) {
+        const id = String(doc?.identifier || "");
+        if (!id) continue;
+        const title = Array.isArray(doc?.title) ? String(doc?.title[0] ?? id) : String(doc?.title ?? id);
+        releases.push({
+          title,
+          post_url: `https://archive.org/details/${id}`,
+          thumbnail: `https://archive.org/services/img/${id}`,
+          date: doc?.year != null ? String(doc.year) : null,
+          site_domain: "archive.org",
+          media_type: "comic_series",
+          season: null,
+          episode: null,
+        });
+      }
+    } catch {}
+  }
+
+  // 3. MangaDex Public API
+  const mdUrl = cleanQ
+    ? `https://api.mangadex.org/manga?title=${encodeURIComponent(cleanQ)}&limit=20&includes[]=cover_art&order[relevance]=desc`
+    : "https://api.mangadex.org/manga?limit=20&includes[]=cover_art&order[latestUploadedChapter]=desc&contentRating[]=safe&contentRating[]=suggestive";
+  const mdResp = await polyfillFetchText(mdUrl, { "User-Agent": `RcloneFlix/${packageJson.version}` });
+  if (mdResp.ok && mdResp.body) {
+    try {
+      const json = JSON.parse(mdResp.body);
+      for (const item of json?.data || []) {
+        const id = String(item?.id || "");
+        if (!id) continue;
+        const titleObj = item?.attributes?.title || {};
+        const title = String(titleObj.en || Object.values(titleObj)[0] || "Untitled Comic");
+        const coverRel = (item?.relationships || []).find((r: any) => r?.type === "cover_art");
+        const coverFile = coverRel?.attributes?.fileName;
+        releases.push({
+          title,
+          post_url: `https://mangadex.org/title/${id}`,
+          thumbnail: coverFile ? `https://uploads.mangadex.org/covers/${id}/${coverFile}.256.jpg` : null,
+          date: item?.attributes?.year != null ? String(item.attributes.year) : null,
+          site_domain: "mangadex.org",
+          media_type: "comic_series",
+          season: null,
+          episode: null,
+        });
+      }
+    } catch {}
+  }
+
+  return {
+    site_url: "https://readcomicsonline.ru",
+    site_title: cleanQ
+      ? `Comics Portal — Results for "${cleanQ}"`
+      : "Comics Portal — Popular Series & Issues",
+    releases,
+  };
+}
+
 if (typeof window !== "undefined" && !(window as any).__TAURI_INTERNALS__) {
   const callbacks = new Map<number, (arg: any) => void>();
   const eventListeners = new Map<string, Set<number>>();
@@ -2763,35 +2865,94 @@ sys.exit(0)
       }
 
       if (cmd === "start_download") {
-        const items = (args.items || []) as Array<{ remote_path: string; filename: string }>;
+        const items = (args.items || []) as Array<{
+          remote_path: string;
+          filename: string;
+          subfolder?: string;
+          headers?: Record<string, string>;
+        }>;
+        const downloadId = String(args.downloadId || args.download_id || `dl-${Date.now()}`);
         const bridge = getBridge();
-        for (const item of items) {
-          const target = `/sdcard/Download/${item.filename}`;
-          const argsJson = JSON.stringify(["copyto", item.remote_path, target]);
-          if (typeof bridge?.runAsyncTask === "function") {
-            await runBridgeTaskAsync("runRcloneCommand", { argsJson });
-          } else if (typeof bridge?.runRcloneCommand === "function") {
-            bridge.runRcloneCommand(argsJson);
-          }
+        if (typeof bridge?.hasStoragePermission === "function" && !bridge.hasStoragePermission()) {
+          if (typeof bridge?.requestStoragePermission === "function") bridge.requestStoragePermission();
+          throw new Error("Storage permission required — grant RcloneFlix storage access, then retry the download.");
         }
-        return "/sdcard/Download";
+        const baseDir = "/sdcard/Download/RcloneFlix";
+        let completed = 0;
+        let destDir = baseDir;
+        const emitProgress = (status: string, currentFile: string, error?: string) => {
+          emitTauriEvent("download-progress", {
+            download_id: downloadId,
+            total_files: items.length,
+            completed_files: completed,
+            current_file: currentFile,
+            destination_path: destDir,
+            status,
+            ...(error ? { error } : {}),
+          });
+        };
+        for (const item of items) {
+          const sub = String(item.subfolder || "").replace(/^\/+|\/+$/g, "");
+          destDir = sub ? `${baseDir}/${sub}` : baseDir;
+          const target = `${destDir}/${item.filename}`;
+          emitProgress("downloading", item.filename);
+          const src = String(item.remote_path || "");
+          let parsed: any;
+          if (src.startsWith("http://") || src.startsWith("https://")) {
+            // DirectPlay web URLs need Referer/UA-aware native download, not rclone
+            parsed = await runBridgeTaskAsync("httpDownload", {
+              url: src,
+              headersJson: JSON.stringify(item.headers || {}),
+              targetPath: target,
+            });
+          } else {
+            parsed = await runBridgeTaskAsync("runRcloneCommand", {
+              argsJson: JSON.stringify(["copyto", src, target]),
+            });
+          }
+          if (!parsed || parsed.ok === false) {
+            const msg = String(parsed?.error || parsed?.stderr || `Download failed for ${item.filename}`);
+            emitProgress("error", item.filename, msg);
+            throw new Error(msg);
+          }
+          completed += 1;
+        }
+        emitProgress("completed", items.length ? items[items.length - 1].filename : "");
+        return destDir;
       }
 
       if (cmd === "start_folder_download") {
         const folderPath = String(args.remote_folder_path || args.remoteFolderPath || "");
         const folderName = String(args.folder_name || args.folderName || "Folder");
-        const bridge = getBridge();
-        const target = `/sdcard/Download/${folderName}`;
-        const argsJson = JSON.stringify(["copy", folderPath, target]);
-        if (typeof bridge?.runAsyncTask === "function") {
-          await runBridgeTaskAsync("runRcloneCommand", { argsJson });
-        } else if (typeof bridge?.runRcloneCommand === "function") {
-          bridge.runRcloneCommand(argsJson);
+        const downloadId = String(args.downloadId || args.download_id || `dl-${Date.now()}`);
+        const target = `/sdcard/Download/RcloneFlix/${folderName}`;
+        const emitFolderProgress = (status: string, error?: string) => {
+          emitTauriEvent("download-progress", {
+            download_id: downloadId,
+            total_files: 1,
+            completed_files: status === "completed" ? 1 : 0,
+            current_file: folderName,
+            destination_path: target,
+            status,
+            ...(error ? { error } : {}),
+          });
+        };
+        emitFolderProgress("downloading");
+        const parsed = await runBridgeTaskAsync("runRcloneCommand", {
+          argsJson: JSON.stringify(["copy", folderPath, target]),
+        });
+        if (!parsed || parsed.ok === false) {
+          const msg = String(parsed?.error || parsed?.stderr || `Folder download failed for ${folderName}`);
+          emitFolderProgress("error", msg);
+          throw new Error(msg);
         }
+        emitFolderProgress("completed");
         return target;
       }
 
       if (cmd === "open_download_folder") {
+        const bridge = getBridge();
+        if (typeof bridge?.openDownloadsFolder === "function") bridge.openDownloadsFolder();
         return null;
       }
 
@@ -3225,6 +3386,75 @@ sys.exit(0)
           }
         }
 
+        // 0-comics. ReadComicsOnline / MangaDex discovery & series drill-down
+        // (Android port of Rust crawl_comics_portal, stream_ingest.rs:4303)
+        if (host.includes("readcomicsonline") || host.includes("mangadex.org") || lowerSite.includes("mangadex://")) {
+          // a) ReadComicsOnline series page → list issues
+          if (host.includes("readcomicsonline") && (lowerSite.includes("/comic/") || lowerSite.includes("/manga/"))) {
+            const resp = await polyfillFetchText(siteUrl, { Referer: "https://readcomicsonline.ru/" });
+            if (resp.ok && resp.body && !resp.body.includes("Just a moment...") && !resp.body.includes("cf_chl_opt")) {
+              const body = resp.body;
+              const titleMatch = body.match(/<title[^>]*>([^<]+)<\/title>/i);
+              const seriesTitle = (titleMatch?.[1] || "Comic Series").replace("Read ", "").replace(" Online", "").trim();
+              const coverMatch = body.match(/<img[^>]+src=["']([^"']+\/uploads\/manga\/[^"']+\/cover\/[^"']+)["']/i);
+              let thumb: string | null = coverMatch ? coverMatch[1] : null;
+              if (thumb && thumb.startsWith("//")) thumb = `https:${thumb}`;
+              else if (thumb && thumb.startsWith("/")) thumb = `https://readcomicsonline.ru${thumb}`;
+              const releases: any[] = [];
+              const chRe = /<h5[^>]*class=["'][^"']*chapter-title-rtl[^"']*["'][^>]*>\s*<a[^>]+href=["'](https?:\/\/[^"']+\/comic\/[^"']+\/(\d+(?:\.\d+)?))["'][^>]*>([^<]+)<\/a>/gi;
+              let m: RegExpExecArray | null;
+              while ((m = chRe.exec(body)) !== null) {
+                const epNum = parseInt(m[2].split(".")[0], 10);
+                releases.push({
+                  title: (m[3] || seriesTitle).trim(),
+                  post_url: m[1],
+                  thumbnail: thumb,
+                  date: null,
+                  site_domain: "readcomicsonline.ru",
+                  media_type: "comics",
+                  season: 1,
+                  episode: Number.isFinite(epNum) ? epNum : null,
+                });
+              }
+              if (releases.length) {
+                releases.reverse(); // Issue #1 first
+                return { site_url: siteUrl, site_title: seriesTitle, releases };
+              }
+            }
+          }
+          // b) MangaDex series → chapter feed
+          const mdMatch = siteUrl.match(/mangadex(?:\.org\/title\/|:\/\/manga\/)([0-9a-f-]+)/i);
+          if (mdMatch) {
+            const resp = await polyfillFetchText(
+              `https://api.mangadex.org/manga/${mdMatch[1]}/feed?translatedLanguage[]=en&order[chapter]=asc&limit=100`,
+              { "User-Agent": `RcloneFlix/${packageJson.version}` }
+            );
+            if (!resp.ok) throw new Error(`MangaDex feed error (HTTP ${resp.status || 0})`);
+            const json = JSON.parse(resp.body || "{}");
+            const releases: any[] = [];
+            for (const ch of json?.data || []) {
+              const attrs = ch?.attributes || {};
+              if (!Number(attrs.pages)) continue; // skip external-only chapters with 0 hosted pages
+              const chNumStr = String(attrs.chapter ?? "1");
+              const chNum = parseInt(chNumStr.split(".")[0], 10);
+              const chTitle = String(attrs.title || "").trim();
+              releases.push({
+                title: chTitle ? `Issue #${chNumStr} - ${chTitle}` : `Issue #${chNumStr}`,
+                post_url: `https://mangadex.org/chapter/${ch.id}`,
+                thumbnail: null,
+                date: attrs.publishAt ? String(attrs.publishAt).slice(0, 10) : null,
+                site_domain: "mangadex.org",
+                media_type: "comics",
+                season: 1,
+                episode: Number.isFinite(chNum) ? chNum : null,
+              });
+            }
+            return { site_url: siteUrl, site_title: "Comic Issues & Chapters", releases };
+          }
+          // c) Bare domain / search URL → portal search
+          return await searchComicsPortalAndroid(searchQuery || "");
+        }
+
         // 1. MovieBite (`moviebite.org`)
         if (host.includes("moviebite")) {
           const apiUrl = searchQuery
@@ -3233,11 +3463,21 @@ sys.exit(0)
           const resp = await polyfillFetchText(apiUrl, {
             Referer: "https://moviebite.org/",
             Accept: "application/json",
+            Origin: "https://moviebite.org",
+            "X-MovieBite-Client": "1",
           });
+          if (!resp.ok) {
+            throw new Error(
+              `MovieBite API returned HTTP ${resp.status || 0}${resp.body ? `: ${resp.body.slice(0, 200)}` : ""}`
+            );
+          }
           const releases: any[] = [];
-          if (resp.ok && resp.body) {
+          if (resp.body) {
             try {
               const json = JSON.parse(resp.body);
+              if (json?.success === false || typeof json?.error === "string") {
+                throw new Error(`MovieBite API error: ${json?.error || "unknown upstream error"}`);
+              }
               const results: any[] = json?.results || json?.data || [];
               for (const item of results) {
                 const id = item?.id ?? item?.tmdbId;
@@ -3262,7 +3502,10 @@ sys.exit(0)
                   episode: null,
                 });
               }
-            } catch {}
+            } catch (e) {
+              if (e instanceof Error && e.message.startsWith("MovieBite")) throw e;
+              // non-MovieBite parse noise: fall through with whatever parsed
+            }
           }
           return {
             site_url: siteUrl,
@@ -4221,9 +4464,80 @@ sys.exit(0)
         throw new Error(`${cmd} is not supported on Android WebView; use browser/HTML5 fallback.`);
       }
 
+      if (cmd === "search_comics_portal") {
+        return await searchComicsPortalAndroid(String(args.query || ""));
+      }
+
+      if (cmd === "extract_comic_issue_pages") {
+        const url = String(args.url || "").trim();
+
+        // 1. MangaDex chapter: mangadex.org/chapter/{id} or mangadex://chapter/{id}
+        const mdCh = url.match(/mangadex(?:\.org\/chapter\/|:\/\/chapter\/)([0-9a-f-]+)/i);
+        if (mdCh) {
+          const resp = await polyfillFetchText(
+            `https://api.mangadex.org/at-home/server/${mdCh[1]}`,
+            { "User-Agent": `RcloneFlix/${packageJson.version}` }
+          );
+          if (!resp.ok) throw new Error(`Failed contacting MangaDex server (HTTP ${resp.status || 0})`);
+          const json = JSON.parse(resp.body || "{}");
+          const baseUrl = String(json?.baseUrl || "https://uploads.mangadex.org");
+          const hash = String(json?.chapter?.hash || "");
+          const pages = (json?.chapter?.data || []).map((f: string) => `${baseUrl}/data/${hash}/${f}`);
+          if (!pages.length) throw new Error("No pages returned for MangaDex chapter");
+          return { title: "Comic Issue", series_title: null, issue_number: null, pages, next_issue_url: null, prev_issue_url: null };
+        }
+
+        // 2. ReadComicsOnline issue page: readcomicsonline.ru/comic/{slug}/{issue}
+        const resp = await polyfillFetchText(url, { Referer: "https://readcomicsonline.ru/" });
+        if (!resp.ok) throw new Error(`Failed to fetch comic issue page (HTTP ${resp.status || 0})`);
+        const body = resp.body || "";
+        if (body.includes("Just a moment...") || body.includes("cf_chl_opt")) {
+          throw new Error(
+            "ReadComicsOnline is currently behind a Cloudflare challenge on this connection. Try selecting an Archive.org or MangaDex stream in the Comics Portal."
+          );
+        }
+        const imgRe = /<img[^>]+class=["'][^"']*img-responsive[^"']*["'][^>]+(?:data-src|src)=["']\s*([^"'\s]+)\s*["']/gi;
+        const pages: string[] = [];
+        let im: RegExpExecArray | null;
+        while ((im = imgRe.exec(body)) !== null) {
+          let imgUrl = im[1].trim();
+          if (imgUrl.startsWith("//")) imgUrl = `https:${imgUrl}`;
+          else if (imgUrl.startsWith("/")) imgUrl = `https://readcomicsonline.ru${imgUrl}`;
+          if (imgUrl.startsWith("http") && !pages.includes(imgUrl)) pages.push(imgUrl);
+        }
+        if (!pages.length) throw new Error("No comic page images found on page");
+        const t = body.match(/<title[^>]*>([^<]+)<\/title>/i);
+        return {
+          title: (t?.[1] || "Comic Issue").trim(),
+          series_title: null,
+          issue_number: null,
+          pages,
+          next_issue_url: null,
+          prev_issue_url: null,
+        };
+      }
+
       if (cmd === "check_ffmpeg_installed") return false;
       if (cmd === "check_fuse_path") return null;
-      if (cmd === "find_downloaded_file") return null;
+      if (cmd === "find_downloaded_file") {
+        const bridge = getBridge();
+        const filename = String(args.filename || "");
+        if (!filename || typeof bridge?.statLocalFile !== "function") return null;
+        const sub = String(args.subfolder || "").replace(/^\/+|\/+$/g, "");
+        const base = "/sdcard/Download/RcloneFlix";
+        const candidates = [
+          sub ? `${base}/${sub}/${filename}` : `${base}/${filename}`,
+          `${base}/${filename}`,
+          `/sdcard/Download/${filename}`, // legacy flat location from pre-fix builds
+        ];
+        for (const p of candidates) {
+          try {
+            const st = JSON.parse(bridge.statLocalFile(p) || "{}");
+            if (st?.exists && Number(st?.size) > 0) return String(st.path || p);
+          } catch {}
+        }
+        return null;
+      }
       if (cmd === "get_alist_status") return { running: false, port: 5244, streamtape_configured: false };
       if (cmd === "get_tailscale_status") return { installed: false, running: false, ip: null, dns_name: null };
       if (cmd === "artwork_cache_stats" || cmd === "vault_photo_cache_stats") return { files: 0, bytes: 0 };

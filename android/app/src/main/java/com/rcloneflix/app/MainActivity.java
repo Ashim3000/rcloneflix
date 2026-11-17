@@ -1673,6 +1673,12 @@ public class MainActivity extends BridgeActivity {
                                 req.optString("headersJson", "{}"),
                                 req.optString("body", "")
                         );
+                    } else if ("httpDownload".equals(taskType)) {
+                        resultJson = httpDownloadToFile(
+                                req.optString("url", ""),
+                                req.optString("headersJson", "{}"),
+                                req.optString("targetPath", "")
+                        );
                     } else if ("runRcloneCommand".equals(taskType)) {
                         resultJson = runRcloneCommand(req.optString("argsJson", "[]"));
                     } else if ("startRclone".equals(taskType)) {
@@ -2024,6 +2030,88 @@ public class MainActivity extends BridgeActivity {
                 Log.w(TAG, "openInExternalPlayer error", e);
                 return false;
             }
+        }
+
+        @JavascriptInterface
+        public String statLocalFile(String path) {
+            JSONObject r = new JSONObject();
+            try {
+                File f = new File(path);
+                r.put("exists", f.isFile());
+                r.put("size", f.isFile() ? f.length() : 0);
+                r.put("path", f.getAbsolutePath());
+            } catch (Exception e) {
+                try { r.put("exists", false); r.put("error", String.valueOf(e)); } catch (Exception ignored) {}
+            }
+            return r.toString();
+        }
+
+        @JavascriptInterface
+        public boolean openDownloadsFolder() {
+            try {
+                Intent intent = new Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                activity.startActivity(intent);
+                return true;
+            } catch (Exception e) {
+                Log.w(TAG, "openDownloadsFolder failed", e);
+                return false;
+            }
+        }
+
+        private String httpDownloadToFile(String urlStr, String headersJson, String targetPath) {
+            JSONObject r = new JSONObject();
+            try {
+                File target = new File(targetPath);
+                File parent = target.getParentFile();
+                if (parent != null && !parent.exists()) parent.mkdirs();
+                java.net.HttpURLConnection conn =
+                        (java.net.HttpURLConnection) new java.net.URL(urlStr).openConnection();
+                conn.setInstanceFollowRedirects(true);
+                conn.setConnectTimeout(20000);
+                conn.setReadTimeout(60000);
+                JSONObject headers = (headersJson != null && !headersJson.isEmpty())
+                        ? new JSONObject(headersJson) : new JSONObject();
+                java.util.Iterator<String> keys = headers.keys();
+                while (keys.hasNext()) {
+                    String k = keys.next();
+                    conn.setRequestProperty(k, headers.optString(k, ""));
+                }
+                if (headers.optString("User-Agent", "").isEmpty()) {
+                    conn.setRequestProperty("User-Agent",
+                            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36");
+                }
+                int code = conn.getResponseCode();
+                if (code < 200 || code >= 300) {
+                    r.put("ok", false);
+                    r.put("status", code);
+                    r.put("error", "HTTP " + code);
+                    conn.disconnect();
+                    return r.toString();
+                }
+                long written = 0;
+                java.io.InputStream in = conn.getInputStream();
+                java.io.FileOutputStream out = new java.io.FileOutputStream(target);
+                try {
+                    byte[] buf = new byte[262144];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                        written += n;
+                    }
+                } finally {
+                    try { out.close(); } catch (Exception ignored) {}
+                    try { in.close(); } catch (Exception ignored) {}
+                }
+                conn.disconnect();
+                r.put("ok", true);
+                r.put("status", code);
+                r.put("bytes", written);
+                r.put("path", target.getAbsolutePath());
+            } catch (Exception e) {
+                try { r.put("ok", false); r.put("error", String.valueOf(e)); } catch (Exception ignored) {}
+            }
+            return r.toString();
         }
     }
 }
