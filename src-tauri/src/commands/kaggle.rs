@@ -709,7 +709,7 @@ for idx, source_str in enumerate(expanded_queue, 1):
             print("🚀 Installing Telethon + Cryptg for 2 GB MTProto upload...")
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", "telethon", "cryptg"], check=True)
             from telethon.sync import TelegramClient
-            from telethon.tl.types import DocumentAttributeFilename
+            from telethon.tl.types import DocumentAttributeFilename, DocumentAttributeVideo
 
             try:
                 client = TelegramClient("/tmp/rflix_kaggle_tg_transcode", int(TG_API_ID), TG_API_HASH)
@@ -726,12 +726,37 @@ for idx, source_str in enumerate(expanded_queue, 1):
                         last_up[0] = now
 
                 target_entity = int(target_chat) if target_chat.lstrip("-").isdigit() else target_chat
+                video_exts = (".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".ts")
+                attrs = [DocumentAttributeFilename(file_name=output_filename)]
+                is_vid = output_filename.lower().endswith(video_exts)
+                if is_vid:
+                    dur, vw, vh = 0, 1280, 720
+                    try:
+                        pr = subprocess.run([
+                            "ffprobe", "-v", "error", "-select_streams", "v:0",
+                            "-show_entries", "stream=width,height",
+                            "-show_entries", "format=duration",
+                            "-of", "json", local_temp_output
+                        ], capture_output=True, text=True, timeout=15)
+                        if pr.returncode == 0:
+                            pdata = json.loads(pr.stdout)
+                            streams = pdata.get("streams") or []
+                            if streams:
+                                vw = int(streams[0].get("width") or vw)
+                                vh = int(streams[0].get("height") or vh)
+                            fmt_dur = (pdata.get("format") or {{}}).get("duration")
+                            if fmt_dur:
+                                dur = int(float(fmt_dur))
+                    except Exception:
+                        pass
+                    attrs.insert(0, DocumentAttributeVideo(duration=dur, w=vw, h=vh, supports_streaming=True))
                 sent_msg = client.send_file(
                     target_entity,
                     local_temp_output,
                     caption=f"🎬 {{output_filename}}",
-                    force_document=True,
-                    attributes=[DocumentAttributeFilename(file_name=output_filename)],
+                    force_document=not is_vid,
+                    supports_streaming=is_vid,
+                    attributes=attrs,
                     progress_callback=tg_progress
                 )
                 msg_id = getattr(sent_msg, "id", 0)
