@@ -2853,6 +2853,43 @@ The following items (100–125) were identified during the comprehensive v0.9.76
 
 ---
 
+### 179. IMPLEMENTED — Random-Access Decompression for Non-Solid Compressed CBR Archives (YACReader-Style Items A–C)
+* **Platform:** Desktop (`src-tauri/crates/infinidysk-archive/src/rar.rs`, `src-tauri/src/commands/archive.rs`)
+* **Root Cause:** `fetch_remote_comic_manifest` rejected any CBR with `!entry.stored`, forcing all compressed non-solid CBRs onto the full progressive download path, and `infinidysk_archive::rar::Entry` did not expose the header block start offset needed to synthesize a single-entry archive.
+* **Resolution:**
+  - `rar.rs`: Added `pub header_start: u64` to `Entry` and populated it from `self.pos` in `Scanner::next` (`Parsed::Advance`).
+  - `archive.rs`: Added `#[serde(default)] pub archive_prefix_len: u64` to `RemoteZipPageEntry`. `fetch_remote_comic_manifest` now emits `compression_method: 100` with `local_header_offset = entry.header_start`, `compressed_size = entry.data.end - entry.header_start`, and `archive_prefix_len` for non-solid, unencrypted, single-volume compressed RAR entries, falling back only for `encrypted`, `split_before`, `split_after`, or `solid || scanner.volume().solid`.
+  - `archive.rs`: `fetch_remote_comic_page` handles `compression_method == 100` by fetching byte ranges `0..archive_prefix_len - 1` and `span_start..span_end`, writing a minimal `page.rar` into a hashed temp directory, extracting via `unrar` (with `7z` fallback), and returning a base64 data URI.
+* **Status:** `RESOLVED` (`cargo check --workspace` and `cargo test -p infinidysk-archive` (6/6) passed; `comic_stream_probe` verified `method=100` random-access extraction on `Capes v01` local CBR [manifest 2.57s, p0 216ms, p80 101ms] and `Dune - House Atreides v02` on `hcrypt:Comics` [manifest 511.55s across 112 sequential header seeks, p0 25.68s, p56 17.70s])
+
+---
+
+### 180. IMPLEMENTED — Progressive Comic First-Page Latency & Backoff Cadence (YACReader-Style Item D)
+* **Platform:** Desktop (`src-tauri/src/commands/archive.rs`)
+* **Root Cause:** `start_progressive_comic_download` used fixed `CHUNK = 4 MiB` and `EXTRACT_EVERY = 8 MiB`, delaying page 1 on solid CBRs until >= 8 MiB had downloaded.
+* **Resolution:** Added `FIRST_CHUNK = 2 * 1024 * 1024`, `MAX_EXTRACT_INTERVAL = 16 * 1024 * 1024`, and doubling `extract_interval` from `2 MiB` up to `16 MiB` after each extraction pass.
+* **Status:** `IMPLEMENTED` (`cargo check --workspace` passed; live `progressive_comic_probe` pending `.cbr` fixture)
+
+---
+
+### 181. IMPLEMENTED — Symmetric Decode-Ahead Buffer & Cover Fast-Path (YACReader-Style Items E–F)
+* **Platform:** Frontend (`src/pages/player/ComicReaderPage.tsx`) & Desktop (`src-tauri/src/commands/archive.rs`, `src-tauri/src/lib.rs`)
+* **Root Cause:** `ComicReaderPage` only preloaded forward pages without `Image.decode()` rasterization or backward prefetch, and no cover-only backend command existed.
+* **Resolution:**
+  - `ComicReaderPage.tsx`: Added `preDecode` (`new Image()` + `im.decode()`) for `primaryUrl`, `secondaryUrl`, the next 2 pages, and `backPage` (`currentPage - 1` or `currentPage - 2` in spread mode).
+  - `archive.rs` & `lib.rs`: Added and registered `fetch_remote_comic_cover(stream_url)` composing `fetch_remote_comic_manifest` + `fetch_remote_comic_page` for the first sorted page.
+* **Status:** `IMPLEMENTED` (`npx tsc --noEmit`, `npm test` (99/99), and `cargo check --workspace` passed; optional frontend card wiring pending)
+
+---
+
+### 182. IMPLEMENTED — In-Process CBZ Extraction via `zip` Crate (YACReader-Style Item G)
+* **Platform:** Desktop (`src-tauri/Cargo.toml`, `src-tauri/src/commands/archive.rs`)
+* **Root Cause:** `extract_comic_pages` spawned external `unzip`/`tar`/`python`/`7z` subprocesses for local CBZ/ZIP files.
+* **Resolution:** Added `zip = { version = "2", default-features = false, features = ["deflate"] }` (`zip v2.6.1`) to `Cargo.toml` and added an in-process `zip::ZipArchive` extraction pass at the start of the ZIP branch in `extract_comic_pages`, retaining external tools as fallbacks.
+* **Status:** `IMPLEMENTED` (`cargo check --workspace` passed)
+
+---
+
 *Document updated: 13 November 2026 — Version 1.0.3: Comprehensive Remediation & Multi-Platform Packaging Release (All Items Resolved & Packaged Across Linux Deb, Flatpak, Windows NSIS, Universal Android APK & Android TV APK)*
 
 

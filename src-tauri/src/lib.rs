@@ -107,6 +107,7 @@ pub fn run() {
             commands::archive::extract_comic_pages,
             commands::archive::fetch_remote_comic_manifest,
             commands::archive::fetch_remote_comic_page,
+            commands::archive::fetch_remote_comic_cover,
             commands::archive::start_progressive_comic_download,
             commands::archive::comic_progressive_status,
             commands::archive::cancel_progressive_comic,

@@ -152,9 +152,40 @@ pub async fn extract_comic_pages(
     let mut extracted = false;
 
     if is_zip_magic || lower.ends_with(".cbz") || lower.ends_with(".zip") {
-        if let Ok(s) = std_command("unzip").args(["-o", "-q", &archive_path, "-d", &dest_str]).status() {
-            if s.success() {
-                extracted = true;
+        // In-process first (no subprocess spawn; works without unzip/python —
+        // notably on Windows), external tools as fallback.
+        let in_process: Result<(), String> = (|| {
+            let f = std::fs::File::open(&archive_path).map_err(|e| e.to_string())?;
+            let mut zip = zip::ZipArchive::new(f).map_err(|e| e.to_string())?;
+            for i in 0..zip.len() {
+                let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
+                if !entry.is_file() {
+                    continue;
+                }
+                let name = entry.name().to_string();
+                if name.contains("__MACOSX") || !is_comic_image_entry(&name) {
+                    continue;
+                }
+                // Flatten subdirs but keep the full path in the name so the
+                // natural sort below still orders pages correctly.
+                let mut flat = name.replace(['/', '\\'], "_");
+                flat.truncate(180);
+                let out_path = dest_dir.join(flat);
+                let mut out = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
+                std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })();
+        if in_process.is_ok() {
+            let mut check = Vec::new();
+            collect_images_recursively(&dest_dir, &mut check);
+            extracted = !check.is_empty();
+        }
+        if !extracted {
+            if let Ok(s) = std_command("unzip").args(["-o", "-q", &archive_path, "-d", &dest_str]).status() {
+                if s.success() {
+                    extracted = true;
+                }
             }
         }
         if !extracted {
@@ -329,8 +360,13 @@ pub async fn start_progressive_comic_download(
             Err(e) => return set_err(format!("HTTP client error: {e}")),
         };
 
+        // First chunk + first extraction are small so page 1 appears after ~2 MB;
+        // the rescan cadence then doubles up to 16 MB to keep repeated tolerant
+        // extractions cheap on big archives.
         const CHUNK: u64 = 4 * 1024 * 1024;
-        const EXTRACT_EVERY: u64 = 8 * 1024 * 1024;
+        const FIRST_CHUNK: u64 = 2 * 1024 * 1024;
+        const MAX_EXTRACT_INTERVAL: u64 = 16 * 1024 * 1024;
+        let mut extract_interval: u64 = FIRST_CHUNK;
         let mut offset: u64 = 0;
         let mut total: Option<u64> = None;
         let mut last_extract_at: u64 = 0;
@@ -351,7 +387,7 @@ pub async fn start_progressive_comic_download(
                 }
             }
 
-            let end = offset + CHUNK - 1;
+            let end = offset + (if offset == 0 { FIRST_CHUNK } else { CHUNK }) - 1;
             let resp = match client
                 .get(&stream_url)
                 .header("Range", format!("bytes={offset}-{end}"))
@@ -403,8 +439,9 @@ pub async fn start_progressive_comic_download(
                 }
             }
 
-            if finished || offset.saturating_sub(last_extract_at) >= EXTRACT_EVERY {
+            if finished || offset.saturating_sub(last_extract_at) >= extract_interval {
                 last_extract_at = offset;
+                extract_interval = (extract_interval * 2).min(MAX_EXTRACT_INTERVAL);
                 let ap = archive_path.clone();
                 let dd = dest_dir.clone();
                 let pages = tokio::task::spawn_blocking(move || partial_extract_pages(&ap, &dd))
@@ -526,10 +563,18 @@ use base64::prelude::*;
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct RemoteZipPageEntry {
     pub name: String,
+    /// 0 = ZIP stored, 8 = ZIP deflate, 99 = stored RAR entry (raw image bytes
+    /// at local_header_offset), 100 = compressed non-solid RAR entry
+    /// (local_header_offset = entry HEADER start; compressed_size = the whole
+    /// header+data span; archive_prefix_len bytes from offset 0 must be
+    /// prepended to form a valid single-entry archive).
     pub compression_method: u16,
     pub compressed_size: u64,
     pub uncompressed_size: u64,
     pub local_header_offset: u64,
+    /// Only used by method 100. serde(default) keeps old persisted manifests valid.
+    #[serde(default)]
+    pub archive_prefix_len: u64,
 }
 
 fn is_comic_image_entry(name: &str) -> bool {
@@ -576,13 +621,155 @@ fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]])
 }
 
+const COMIC_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+const COMIC_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+fn comic_cache_root() -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        return std::path::PathBuf::from(local_app_data)
+            .join("rcloneflix")
+            .join("cache")
+            .join("comics");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
+            if !xdg.is_empty() {
+                return std::path::PathBuf::from(xdg).join("rcloneflix").join("comics");
+            }
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            if !home.is_empty() {
+                return std::path::PathBuf::from(home)
+                    .join(".cache")
+                    .join("rcloneflix")
+                    .join("comics");
+            }
+        }
+    }
+    std::env::temp_dir().join("rcloneflix-comic-cache")
+}
+
+fn sanitize_cache_key(raw: &str) -> Option<String> {
+    let clean: String = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(120)
+        .collect();
+    if clean.is_empty() { None } else { Some(clean) }
+}
+
+fn is_cache_fresh(path: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
+        return true;
+    };
+    age.as_secs() < COMIC_CACHE_TTL_SECS
+}
+
+fn dir_size_bytes(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            total = total.saturating_add(dir_size_bytes(&p));
+        } else if let Ok(m) = entry.metadata() {
+            total = total.saturating_add(m.len());
+        }
+    }
+    total
+}
+
+fn prune_comic_cache(root: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut active: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = Vec::new();
+    let mut total_bytes = 0u64;
+
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let expired = now
+            .duration_since(mtime)
+            .map(|d| d.as_secs() >= COMIC_CACHE_TTL_SECS)
+            .unwrap_or(false);
+        if expired {
+            let _ = std::fs::remove_dir_all(&p);
+            continue;
+        }
+        let sz = dir_size_bytes(&p);
+        total_bytes = total_bytes.saturating_add(sz);
+        active.push((mtime, sz, p));
+    }
+
+    if total_bytes > COMIC_CACHE_MAX_BYTES {
+        active.sort_by_key(|(mtime, _, _)| *mtime);
+        for (_, sz, p) in active {
+            if total_bytes <= COMIC_CACHE_MAX_BYTES {
+                break;
+            }
+            let _ = std::fs::remove_dir_all(&p);
+            total_bytes = total_bytes.saturating_sub(sz);
+        }
+    }
+}
+
+fn save_manifest_cache(cache_key: &Option<String>, entries: &[RemoteZipPageEntry]) {
+    let Some(key) = cache_key.as_deref().and_then(sanitize_cache_key) else {
+        return;
+    };
+    let root = comic_cache_root();
+    let book_dir = root.join(&key);
+    if std::fs::create_dir_all(&book_dir).is_err() {
+        return;
+    }
+    if let Ok(json) = serde_json::to_vec(entries) {
+        let tmp = book_dir.join("manifest.json.tmp");
+        let dst = book_dir.join("manifest.json");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &dst);
+        }
+    }
+    prune_comic_cache(&root);
+}
+
 /// Fetches only the ZIP Central Directory via HTTP Range requests against `stream_url`
 /// (such as `rclone serve http` on 127.0.0.1 or a remote HTTPS .cbz URL) and returns
 /// naturally sorted image entries in milliseconds without downloading the full archive.
 #[tauri::command]
 pub async fn fetch_remote_comic_manifest(
     stream_url: String,
+    cache_key: Option<String>,
 ) -> Result<Vec<RemoteZipPageEntry>, String> {
+    if let Some(key) = cache_key.as_deref().and_then(sanitize_cache_key) {
+        let manifest_path = comic_cache_root().join(&key).join("manifest.json");
+        if is_cache_fresh(&manifest_path) {
+            if let Ok(bytes) = std::fs::read(&manifest_path) {
+                if let Ok(entries) = serde_json::from_slice::<Vec<RemoteZipPageEntry>>(&bytes) {
+                    if !entries.is_empty() {
+                        return Ok(entries);
+                    }
+                }
+            }
+        }
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
@@ -651,6 +838,7 @@ pub async fn fetch_remote_comic_manifest(
             let mut scanner = infinidysk_archive::rar::Scanner::new();
             let mut current_offset: u64 = 0;
             let mut entries = Vec::new();
+            let mut archive_prefix_len: u64 = 0;
 
             loop {
                 let fetch_len: u64 = 65_536.min(total_size.saturating_sub(current_offset));
@@ -671,18 +859,43 @@ pub async fn fetch_remote_comic_manifest(
                         current_offset = offset;
                     }
                     Ok(infinidysk_archive::rar::Step::Entry(entry)) => {
+                        // Everything before the first entry header (signature, main
+                        // header, service blocks) is the reusable archive prefix.
+                        if archive_prefix_len == 0 {
+                            archive_prefix_len = entry.header_start;
+                        }
                         if is_comic_image_entry(&entry.name) {
-                            if !entry.stored {
-                                return Err("CBR archive contains compressed RAR streams; falling back to full download".to_string());
+                            if entry.encrypted || entry.split_before || entry.split_after {
+                                return Err("CBR entry is encrypted or spans volumes; falling back to full extractor".to_string());
+                            }
+                            if entry.solid || scanner.volume().solid {
+                                // Solid streams need every prior entry decompressed first —
+                                // only the progressive sequential path can serve these.
+                                return Err("CBR archive uses solid compression; falling back to progressive download".to_string());
                             }
                             let packed_len = entry.data.end.saturating_sub(entry.data.start);
-                            entries.push(RemoteZipPageEntry {
-                                name: entry.name,
-                                compression_method: 99, // 99 indicates stored RAR entry
-                                compressed_size: packed_len,
-                                uncompressed_size: entry.size.unwrap_or(packed_len),
-                                local_header_offset: entry.data.start,
-                            });
+                            if entry.stored {
+                                entries.push(RemoteZipPageEntry {
+                                    name: entry.name,
+                                    compression_method: 99, // stored RAR entry: raw image bytes
+                                    compressed_size: packed_len,
+                                    uncompressed_size: entry.size.unwrap_or(packed_len),
+                                    local_header_offset: entry.data.start,
+                                    archive_prefix_len: 0,
+                                });
+                            } else {
+                                // Non-solid compressed entry: YACReader-style random access.
+                                // Span = header..data_end, self-contained once the prefix
+                                // is prepended (extracted by Item C).
+                                entries.push(RemoteZipPageEntry {
+                                    name: entry.name,
+                                    compression_method: 100,
+                                    compressed_size: entry.data.end.saturating_sub(entry.header_start),
+                                    uncompressed_size: entry.size.unwrap_or(packed_len),
+                                    local_header_offset: entry.header_start,
+                                    archive_prefix_len,
+                                });
+                            }
                         }
                         current_offset = entry.data.end;
                     }
@@ -700,6 +913,7 @@ pub async fn fetch_remote_comic_manifest(
                 return Err("No comic image entries found in CBR archive; falling back".to_string());
             }
             entries.sort_by(|a, b| natord_cmp(&a.name, &b.name));
+            save_manifest_cache(&cache_key, &entries);
             return Ok(entries);
         }
     }
@@ -801,6 +1015,7 @@ pub async fn fetch_remote_comic_manifest(
                 compressed_size,
                 uncompressed_size,
                 local_header_offset,
+                archive_prefix_len: 0,
             });
         }
     }
@@ -810,6 +1025,7 @@ pub async fn fetch_remote_comic_manifest(
     }
 
     entries.sort_by(|a, b| natord_cmp(&a.name, &b.name));
+    save_manifest_cache(&cache_key, &entries);
     Ok(entries)
 }
 
@@ -819,11 +1035,112 @@ pub async fn fetch_remote_comic_manifest(
 pub async fn fetch_remote_comic_page(
     stream_url: String,
     entry: RemoteZipPageEntry,
+    cache_key: Option<String>,
 ) -> Result<String, String> {
+    let page_cache_file = cache_key
+        .as_deref()
+        .and_then(sanitize_cache_key)
+        .map(|key| {
+            comic_cache_root()
+                .join(&key)
+                .join("pages")
+                .join(format!("{}_{}.bin", entry.local_header_offset, entry.compressed_size))
+        });
+
+    if let Some(ref p) = page_cache_file {
+        if is_cache_fresh(p) {
+            if let Ok(cached_bytes) = std::fs::read(p) {
+                if !cached_bytes.is_empty() {
+                    let mime = mime_for_image_name(&entry.name);
+                    return Ok(format!(
+                        "data:{};base64,{}",
+                        mime,
+                        BASE64_STANDARD.encode(&cached_bytes)
+                    ));
+                }
+            }
+        }
+    }
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    // Compressed non-solid RAR entries (method 100): synthesize a minimal
+    // single-entry archive (prefix + header/data span) and decompress just this
+    // page — no full-archive download (YACReader-style selective extraction).
+    if entry.compression_method == 100 {
+        if entry.archive_prefix_len == 0 || entry.archive_prefix_len > 4 * 1024 * 1024 {
+            return Err("Invalid CBR archive prefix length for page extraction".to_string());
+        }
+        let prefix_resp = client
+            .get(&stream_url)
+            .header("Range", format!("bytes=0-{}", entry.archive_prefix_len - 1))
+            .header("User-Agent", "Mozilla/5.0 RcloneFlix/1.0")
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch CBR archive prefix: {}", e))?;
+        let prefix_bytes = prefix_resp.bytes().await.map_err(|e| format!("Reading CBR prefix failed: {}", e))?;
+
+        let span_start = entry.local_header_offset;
+        let span_end = span_start + entry.compressed_size.saturating_sub(1);
+        let span_resp = client
+            .get(&stream_url)
+            .header("Range", format!("bytes={}-{}", span_start, span_end))
+            .header("User-Agent", "Mozilla/5.0 RcloneFlix/1.0")
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch CBR page span: {}", e))?;
+        let span_bytes = span_resp.bytes().await.map_err(|e| format!("Reading CBR page span failed: {}", e))?;
+
+        // Unique temp area per (stream, entry) so concurrent prefetches never collide.
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        stream_url.hash(&mut h);
+        entry.local_header_offset.hash(&mut h);
+        let base = std::env::temp_dir()
+            .join("rcloneflix-books")
+            .join("rar-pages")
+            .join(format!("{:016x}", h.finish()));
+        let out_dir = base.join("out");
+        std::fs::create_dir_all(&out_dir).map_err(|e| format!("temp dir: {}", e))?;
+        let rar_path = base.join("page.rar");
+        std::fs::write(&rar_path, [prefix_bytes.as_ref(), span_bytes.as_ref()].concat())
+            .map_err(|e| format!("temp write: {}", e))?;
+
+        let rar_str = rar_path.to_string_lossy().into_owned();
+        let out_str = out_dir.to_string_lossy().into_owned();
+        // Exit status intentionally ignored: the missing end-of-archive block is
+        // reported as an error even though the entry extracts fine.
+        let _ = std_command("unrar").args(["x", "-y", "-inul", &rar_str, &format!("{}/", out_str)]).output();
+        let mut images = Vec::new();
+        collect_images_recursively(&out_dir, &mut images);
+        if images.is_empty() {
+            let _ = std_command("7z").args(["x", "-y", &rar_str, &format!("-o{}", out_str)]).output();
+            collect_images_recursively(&out_dir, &mut images);
+        }
+
+        let extracted = if let Some(img) = images.first() {
+            std::fs::read(img).map_err(|e| format!("Failed reading extracted page: {}", e))
+        } else {
+            Err("Could not extract compressed CBR page (is unrar or 7z installed?)".to_string())
+        };
+        let _ = std::fs::remove_dir_all(&base);
+        let raw_image_bytes = extracted?;
+        if let Some(ref p) = page_cache_file {
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(p, &raw_image_bytes);
+        }
+        let mime = mime_for_image_name(&entry.name);
+        return Ok(format!(
+            "data:{};base64,{}",
+            mime,
+            BASE64_STANDARD.encode(&raw_image_bytes)
+        ));
+    }
 
     // Stored RAR entries (method 99) directly contain the raw image bytes at local_header_offset
     if entry.compression_method == 99 {
@@ -903,9 +1220,28 @@ pub async fn fetch_remote_comic_page(
         return Err(format!("Unsupported compression method: {}", entry.compression_method));
     };
 
+    if let Some(ref p) = page_cache_file {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(p, &raw_image_bytes);
+    }
+
     let mime = mime_for_image_name(&entry.name);
     let b64 = BASE64_STANDARD.encode(&raw_image_bytes);
     Ok(format!("data:{};base64,{}", mime, b64))
+}
+
+/// First page only, for library/card thumbnails — never downloads the archive.
+/// (YACReaderLibrary-style cover fast path.)
+#[tauri::command]
+pub async fn fetch_remote_comic_cover(stream_url: String) -> Result<String, String> {
+    let entries = fetch_remote_comic_manifest(stream_url.clone(), None).await?;
+    let first = entries
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No pages found in comic".to_string())?;
+    fetch_remote_comic_page(stream_url, first, None).await
 }
 
 #[cfg(test)]
@@ -930,7 +1266,7 @@ mod comic_stream_tests {
             let url = format!("{}/{}", base.trim_end_matches('/'), enc);
             println!("\n=== {} ===", fname);
             let t0 = std::time::Instant::now();
-            match fetch_remote_comic_manifest(url.clone()).await {
+            match fetch_remote_comic_manifest(url.clone(), None).await {
                 Err(e) => println!("MANIFEST ERR ({:?}): {}", t0.elapsed(), e),
                 Ok(entries) => {
                     println!(
@@ -946,7 +1282,7 @@ mod comic_stream_tests {
                         let e = entries[idx].clone();
                         let name = e.name.clone();
                         let t1 = std::time::Instant::now();
-                        match fetch_remote_comic_page(url.clone(), e).await {
+                        match fetch_remote_comic_page(url.clone(), e, None).await {
                             Err(err) => println!("  PAGE {} ('{}') ERR ({:?}): {}", idx, name, t1.elapsed(), err),
                             Ok(data_uri) => {
                                 let head = &data_uri[..data_uri.len().min(40)];

@@ -41,6 +41,9 @@ pub struct Entry {
     pub name: String,
     /// Absolute byte range of the packed data in this volume.
     pub data: Range<u64>,
+    /// Absolute offset where this entry's header block starts in the volume.
+    /// `header_start..data.end` is the complete self-contained span of this entry.
+    pub header_start: u64,
     /// Unpacked size of the whole file, when the archive records it.
     pub size: Option<u64>,
     /// RAR5: CRC of the whole file (last part only). RAR4: CRC of this part's
@@ -155,11 +158,13 @@ impl Scanner {
                 }
                 Parsed::Key(kdf) => return Ok(Step::Key(kdf)),
                 Parsed::Advance(len, entry) => {
+                    let header_start = self.pos;
                     self.pos = self
                         .pos
                         .checked_add(len)
                         .ok_or_else(|| self.corrupt("data size"))?;
-                    if let Some(entry) = entry {
+                    if let Some(mut entry) = entry {
+                        entry.header_start = header_start;
                         return Ok(Step::Entry(entry));
                     }
                 }
@@ -380,6 +385,7 @@ impl Scanner {
                 // A MAC-tweaked checksum is not the plain CRC of the content.
                 let tweaked = crypt.as_ref().is_some_and(|(_, tweaked)| *tweaked);
                 (file & 0x1 == 0).then(|| Entry {
+                    header_start: 0, // set by Scanner::next before the entry is returned
                     name: String::from_utf8_lossy(name).into_owned(),
                     data: self.pos + disk..end,
                     size: (file & 0x8 == 0).then_some(size),
@@ -495,6 +501,7 @@ impl Scanner {
                     .checked_add(packed)
                     .ok_or_else(|| self.corrupt("data size"))?;
                 let entry = (flags & 0x00e0 != 0x00e0).then(|| Entry {
+                    header_start: 0, // set by Scanner::next before the entry is returned
                     name: rar4_name(name, flags & 0x0200 != 0),
                     data: start..end,
                     size: (unpacked != u64::MAX && unpacked != u64::from(u32::MAX))

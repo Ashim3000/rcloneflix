@@ -53,5 +53,6 @@ infinidysk-archive = { path = "crates/infinidysk-archive" }
 tokio-rustls = "0.26"
 webpki-roots = "0.26"
 mdns-sd = "0.13"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 

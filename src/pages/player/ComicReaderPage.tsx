@@ -62,6 +62,8 @@ export function ComicReaderPage() {
   const directWebUrlsRef = useRef<string[]>([]);
   const diskPagesRef = useRef<string[]>([]);
   const pageDataCacheRef = useRef<Map<number, string>>(new Map());
+  const buildComicCacheKey = (it: { id: string; sizeBytes?: number } | null | undefined) =>
+    it ? `${it.id}_${it.sizeBytes || 0}`.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 120) : null;
   // Progressive (streaming) download of compressed .cbr archives
   const progressivePollRef = useRef<number | null>(null);
   const progressiveActiveRef = useRef(false);
@@ -195,9 +197,11 @@ export function ComicReaderPage() {
 
     if (remoteEntriesRef.current.length >= pageNum && streamUrlRef.current) {
       const entry = remoteEntriesRef.current[pageNum - 1];
+      const cacheKey = buildComicCacheKey(item);
       const dataUri = await invoke<string>("fetch_remote_comic_page", {
         streamUrl: streamUrlRef.current,
         entry,
+        cacheKey,
       });
       pageDataCacheRef.current.set(pageNum, dataUri);
       // Sliding-window eviction: keep ~16 pages around the cursor.
@@ -307,8 +311,10 @@ export function ComicReaderPage() {
           if (candidateStreamUrl && !cancelled) {
             try {
               setStatusText("Reading comic page index (instant stream)...");
+              const cacheKey = buildComicCacheKey(item);
               const entries = await invoke<RemoteZipPageEntry[]>("fetch_remote_comic_manifest", {
                 streamUrl: candidateStreamUrl,
+                cacheKey,
               });
               if (cancelled) return;
               if (entries && entries.length > 0) {
@@ -327,7 +333,7 @@ export function ComicReaderPage() {
               // server CAN range-serve) — stream the archive down progressively and show
               // pages as they are extracted, instead of blocking on the full download.
               const msg = String(manifestErr?.message || manifestErr || "");
-              const progressiveEligible = /compressed RAR|not a standard ZIP/i.test(msg);
+              const progressiveEligible = /compressed RAR|solid compression|encrypted or spans volumes|not a standard ZIP/i.test(msg);
               if (progressiveEligible && !cancelled) {
                 try {
                   await invoke("start_progressive_comic_download", {
@@ -501,10 +507,27 @@ export function ComicReaderPage() {
           lastWatchedAt: Date.now(),
         });
 
-        // Preload next 2 pages in background for instant page turns
+        // Preload a symmetric window and pre-rasterize (YACReader-style decode
+        // buffer): next 2 pages AND the previous page, then Image.decode() so a
+        // page turn lands on an already-decoded bitmap instead of paying JPEG
+        // decode (hundreds of ms for 4K scans) on display.
+        const preDecode = (u: string | null) => {
+          if (!u) return;
+          try {
+            const im = new Image();
+            im.src = u;
+            void im.decode().catch(() => {});
+          } catch {}
+        };
+        preDecode(primaryUrl);
+        preDecode(secondaryUrl);
         const preloadStart = readerMode === "spread" ? currentPage + 2 : currentPage + 1;
         for (let p = preloadStart; p <= Math.min(totalPages, preloadStart + 1); p++) {
-          void resolveSinglePageUrl(p).catch(() => {});
+          void resolveSinglePageUrl(p).then(preDecode).catch(() => {});
+        }
+        const backPage = readerMode === "spread" ? currentPage - 2 : currentPage - 1;
+        if (backPage >= 1) {
+          void resolveSinglePageUrl(backPage).then(preDecode).catch(() => {});
         }
       } catch (err: any) {
         if (!cancelled) {
