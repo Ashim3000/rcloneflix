@@ -7,7 +7,7 @@
 2. After each fix: run `npx tsc --noEmit` (frontend) or `cargo check` in `src-tauri/` (backend).
 3. When a fix is **implemented and verified**, add/update its entry in `KNOWN_BUGS_AND_FIXES.md`. Never mark RESOLVED from intent — grep for the symbol the fix introduces.
 4. Package with `npx tauri build --bundles deb`, never test raw `cargo build` binaries.
-5. All work stays local. Never push to any remote.
+5. ~~All work stays local. Never push to any remote.~~ *(Superseded 2026-11-16 — repo is public under GPL-3.0-only; see `AGENTS.md` §1.5. Never push secrets.)*
 
 ## Priority Index
 

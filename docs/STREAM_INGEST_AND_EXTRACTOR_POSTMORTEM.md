@@ -106,5 +106,5 @@
 1. **Always consult existing documentation and post-mortems in `docs/` and `KNOWN_BUGS_AND_FIXES.md` before modifying scrapers, resolvers, or packaging workflows.**
 2. **Never alter `is_direct_media_url` without verifying cyberlocker host exclusions.**
 3. **Never test standalone releases using unbundled `cargo build --release` binaries; always run `npx tauri build --bundles deb` followed by `sudo dpkg -i` to verify embedded asset loading.**
-4. **Never push code to remote git repositories (pair programming is strictly local).**
+4. **Never push secrets to remote git repositories.** *(Updated 2026-11-16: the repo is public under GPL-3.0-only — pushing code is allowed when the user asks; see `AGENTS.md` §1.5.)*
 5. **Always verify stream playback in VLC directly rather than relying merely on HTTP 200 responses.**

@@ -42,7 +42,7 @@ All finished artifacts go to `/mnt/chromeos/MyFiles/Downloads/` (the scripts mos
 
 ## Hard rules
 
-- **Never push to any git remote.** All work stays local (repo is being kept private for sale).
+- ~~Never push to any git remote. All work stays local (repo is being kept private for sale).~~ **Superseded 2026-11-16:** the repo is now public under GPL-3.0-only at `github.com/Ashim3000/rcloneflix`. Pushing code is allowed when the user asks; never push secrets (keystore, `key.properties`, tokens). See `AGENTS.md` §1.5 for the current distribution model.
 - Do not run `git checkout .`, `git clean`, `git stash`, or any history rewrite.
 - Do not bump the version — this is still 1.0.3.
 - If a build fails: capture the last ~50 log lines, stop, and report. Do not "fix" source files.

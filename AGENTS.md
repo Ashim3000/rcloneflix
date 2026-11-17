@@ -45,5 +45,7 @@
 * **Mandatory Debian Bundling**: Never test standalone execution with raw unbundled `cargo build --release` binaries; doing so leaves `devUrl: "http://localhost:1420"` active and causes `Connection refused`.
 * **Packaging Pipeline**: Always run `npx tauri build --bundles deb` followed by `sudo dpkg -i /home/ashim3000/rcloneflix/src-tauri/target/release/bundle/deb/RcloneFlix_0.6.10_amd64.deb` before launching `/usr/bin/rcloneflix`.
 
-### 1.5 Version Control & Repositories
-* **Local Pair Programming Only**: Never push code, branches, or tags to GitHub or any remote repository. All work is strictly local on this machine.
+### 1.5 Version Control, Licensing & Distribution (updated 2026-11-16)
+* **Open Source**: The repo is public at `github.com/Ashim3000/rcloneflix` under **GPL-3.0-only** (history squashed at the v1.0.31 release commit). Pushing code and docs to `origin` is allowed — but only when the user asks.
+* **Never push secrets**: `android/rcloneflix-release.jks`, `android/key.properties`, `jniLibs/`, rclone configs, and anything under the app data dir (`~/.local/share/com.rcloneflix.desktop/`) stay gitignored and local. The git remote URLs embed personal access tokens — never copy a remote URL into any committed file or document.
+* **Hybrid distribution model**: the source code plus the Windows `.exe` and Linux `.deb` are free downloads. Every other package is **sold** — Android APKs via the Google Play Store, the Windows Store build via the Microsoft Store, and remaining packages (e.g. `.flatpak`) via Payhip. Do not publish paid-channel packages as free release assets.

@@ -3,7 +3,7 @@
 **Version:** 1.1.0  
 **Status:** Approved Architecture & Implementation Blueprint  
 **Location:** `/home/ashim3000/rcloneflix/docs/DIRECTPLAY_AND_DISCOVERY_SPEC.md`  
-**Confidentiality:** Strictly Local Document — DO NOT PUSH TO GITHUB OR PUBLIC REPOSITORIES  
+**Confidentiality:** Public since 2026-11-16 — repo open-sourced under GPL-3.0-only (see `AGENTS.md` §1.5)  
 **Target Platform:** Linux Desktop (Tauri v2 + React 18 / TypeScript + Rust + bundled Rclone + bundled yt-dlp)  
 **Future Targets:** Windows Desktop (.msi / .exe), Android (Tauri Mobile)
 
