@@ -1,6 +1,6 @@
 [package]
 name = "rcloneflix"
-version = "1.0.31"
+version = "1.0.32"
 description = "RcloneFlix - Stream media from rclone remotes"
 authors = ["RcloneFlix"]
 license = "GPL-3.0-only"
