@@ -776,42 +776,6 @@ export function MediaDetailPage() {
                       </button>
                     )}
 
-                    {/* Catbox.moe Opt-In Offload (Desktop only, non-video <= 200 MB) */}
-                    {catboxEnabled &&
-                      !(typeof window !== "undefined" && (window as any).AndroidBridge) &&
-                      (["music", "books", "comics", "audiobooks"].includes(item.libraryType as string)) &&
-                      (!item.sizeBytes || item.sizeBytes <= 200 * 1024 * 1024) && (
-                        item.versions?.some((v) => v.remoteName === "catbox" || (v.sourceType as any) === "catbox") ? (
-                          <div
-                            className="btn-secondary opacity-80 cursor-default flex items-center gap-2 px-4 py-3 text-emerald-400 border border-emerald-500/30"
-                            title="Cached on Catbox.moe public hotlink"
-                          >
-                            <CheckCircle2 size={16} />
-                            <span>Catbox Cached</span>
-                          </div>
-                        ) : (
-                          <button
-                            onClick={async () => {
-                              setPushingToCatbox(true);
-                              try {
-                                const url = await offloadItemToCatbox(item);
-                                useToastStore.getState().addToast(`Offloaded to Catbox (public link): ${url}`, "success");
-                              } catch (err: any) {
-                                useToastStore.getState().addToast(`Catbox offload failed: ${err?.message || err}`, "error");
-                              } finally {
-                                setPushingToCatbox(false);
-                              }
-                            }}
-                            disabled={pushingToCatbox}
-                            title="Offload to Catbox.moe (creates a public https://files.catbox.moe/... URL)"
-                            className="btn-secondary flex items-center gap-2 px-4 py-3 text-amber-300 border border-amber-500/30 hover:bg-amber-500/10 disabled:opacity-50"
-                          >
-                            {pushingToCatbox ? <Loader2 size={16} className="animate-spin" /> : <CloudUpload size={16} />}
-                            <span>{pushingToCatbox ? "Uploading to Catbox…" : "Offload to Catbox"}</span>
-                          </button>
-                        )
-                      )}
-
                     {/* Streamtape Tier 1 Offload */}
                     {item.versions?.some(
                       (v) =>
@@ -983,6 +947,42 @@ export function MediaDetailPage() {
                 })()
               )}
 
+              {/* Catbox.moe Opt-In Offload (Desktop only, non-video <= 200 MB) */}
+              {catboxEnabled &&
+                !(typeof window !== "undefined" && (window as any).AndroidBridge) &&
+                (["music", "books", "comics", "audiobooks"].includes(item.libraryType as string)) &&
+                (!item.sizeBytes || item.sizeBytes <= 200 * 1024 * 1024) && (
+                  item.versions?.some((v) => v.remoteName === "catbox" || (v.sourceType as any) === "catbox") ? (
+                    <div
+                      className="btn-secondary opacity-80 cursor-default flex items-center gap-2 px-4 py-3 text-emerald-400 border border-emerald-500/30"
+                      title="Cached on Catbox.moe public hotlink"
+                    >
+                      <CheckCircle2 size={16} />
+                      <span>Catbox Cached</span>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={async () => {
+                        setPushingToCatbox(true);
+                        try {
+                          const url = await offloadItemToCatbox(item);
+                          useToastStore.getState().addToast(`Offloaded to Catbox (public link): ${url}`, "success");
+                        } catch (err: any) {
+                          useToastStore.getState().addToast(`Catbox offload failed: ${err?.message || err}`, "error");
+                        } finally {
+                          setPushingToCatbox(false);
+                        }
+                      }}
+                      disabled={pushingToCatbox}
+                      title="Offload to Catbox.moe (creates a public https://files.catbox.moe/... URL)"
+                      className="btn-secondary flex items-center gap-2 px-4 py-3 text-amber-300 border border-amber-500/30 hover:bg-amber-500/10 disabled:opacity-50"
+                    >
+                      {pushingToCatbox ? <Loader2 size={16} className="animate-spin" /> : <CloudUpload size={16} />}
+                      <span>{pushingToCatbox ? "Uploading to Catbox…" : "Offload to Catbox"}</span>
+                    </button>
+                  )
+                )}
+
               <button
                 onClick={() => setShowFixMatch(true)}
                 className="btn-secondary flex items-center gap-2 px-4 py-3"
@@ -991,7 +991,8 @@ export function MediaDetailPage() {
                 Fix Match
               </button>
 
-              {(item.libraryType as string) === "adult" && (
+              {((item.libraryType as string) === "adult" ||
+                libraries.find((l) => l.id === item.libraryId)?.type === "adult") && (
                 <button
                   onClick={() => setShowFingerprintModal(true)}
                   className="btn-secondary flex items-center gap-2 px-4 py-3"

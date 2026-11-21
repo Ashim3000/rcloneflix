@@ -567,16 +567,26 @@ export function AudioMiniPlayer({ playlist, playlistIndex: initialIndex, playTok
           library?.remotePaths.find((p) => {
             const r = p.replace(/\/+$/, "");
             return track.remotePath.startsWith(r + "/") || (r.endsWith(":") && track.remotePath.startsWith(r));
-          }) ?? library?.remotePaths[0] ?? "";
+          }) ??
+          library?.remotePaths[0] ??
+          (track.remotePath.includes(":") ? track.remotePath.slice(0, track.remotePath.indexOf(":") + 1) : "");
 
         const rootTrimmed = matchingRoot.replace(/\/+$/, "");
-        if (track.remotePath.startsWith(rootTrimmed + "/")) {
+        if (matchingRoot && track.remotePath.startsWith(rootTrimmed + "/")) {
           relPath = track.remotePath.slice(rootTrimmed.length + 1);
-        } else if (rootTrimmed.endsWith(":") && track.remotePath.startsWith(rootTrimmed)) {
+        } else if (matchingRoot && rootTrimmed.endsWith(":") && track.remotePath.startsWith(rootTrimmed)) {
           relPath = track.remotePath.slice(rootTrimmed.length).replace(/^\/+/, "");
+        } else if (track.remotePath.includes(":")) {
+          const colonIdx = track.remotePath.indexOf(":");
+          matchingRoot = track.remotePath.slice(0, colonIdx + 1);
+          relPath = track.remotePath.slice(colonIdx + 1).replace(/^\/+/, "");
         } else {
           relPath = track.remotePath.split("/").pop() ?? track.filename;
         }
+      }
+
+      if (!matchingRoot) {
+        throw new Error(`No remote root found for "${track.remotePath || track.filename}"`);
       }
 
       const res = await invoke<{ file_url: string }>("start_stream_session", {

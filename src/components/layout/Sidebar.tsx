@@ -322,11 +322,11 @@ export function Sidebar({
           isOpen={showAddBookmarkModal}
           onClose={() => setShowAddBookmarkModal(false)}
         />
-        <ProviderSearchModal
-          isOpen={showProviderSearch}
-          onClose={() => setShowProviderSearch(false)}
-        />
       </aside>
+      <ProviderSearchModal
+        isOpen={showProviderSearch}
+        onClose={() => setShowProviderSearch(false)}
+      />
     </>
   );
 }

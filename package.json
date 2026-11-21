@@ -1,6 +1,6 @@
 {
   "name": "rcloneflix",
-  "version": "1.0.32",
+  "version": "1.0.4",
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {

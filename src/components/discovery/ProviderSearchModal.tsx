@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Search, Play, Bell, Sparkles, Loader2, Check } from "lucide-react";
@@ -309,7 +310,7 @@ export function ProviderSearchModal({ isOpen, onClose }: { isOpen: boolean; onCl
     });
   };
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
       <div className="bg-surface border border-border rounded-2xl w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
         <div className="px-5 py-4 border-b border-border flex items-center justify-between">
@@ -407,6 +408,7 @@ export function ProviderSearchModal({ isOpen, onClose }: { isOpen: boolean; onCl
           seed={subscribeSeed}
         />
       )}
-    </div>
+    </div>,
+    document.body
   );
 }

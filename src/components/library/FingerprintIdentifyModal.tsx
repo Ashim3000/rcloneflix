@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { Fingerprint, Loader2, Search, X, Check } from "lucide-react";
 import { isLocalPath, useAppStore, type MediaItem } from "../../store/appStore";
@@ -139,8 +140,8 @@ export function FingerprintIdentifyModal({ item, onClose }: Props) {
     onClose();
   };
 
-  return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+  return createPortal(
+    <div className="fixed inset-0 z-[10000] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
       <div className="bg-surface border border-border rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
         <div className="px-5 py-4 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -226,6 +227,7 @@ export function FingerprintIdentifyModal({ item, onClose }: Props) {
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

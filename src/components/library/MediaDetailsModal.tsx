@@ -35,6 +35,7 @@ import { EasynewsSearchModal } from "../discovery/EasynewsSearchModal";
 import { StremioStreamsModal } from "../discovery/StremioStreamsModal";
 import { InfiniDyskSearchModal } from "../discovery/InfiniDyskSearchModal";
 import { OffloadMirrorsPanel } from "./OffloadMirrorsPanel";
+import { FingerprintIdentifyModal } from "./FingerprintIdentifyModal";
 import { extractMediaTechnicalSpecs } from "../../lib/mediaInfo";
 import {
   offloadAudioItemToDropmb,
@@ -106,6 +107,7 @@ export function MediaDetailsModal({
   const [showTrailerPlayer, setShowTrailerPlayer] = useState(false);
   const [trailerSearched, setTrailerSearched] = useState(false);
   const [showFixMatch, setShowFixMatch] = useState(false);
+  const [showFingerprintModal, setShowFingerprintModal] = useState(false);
   const [showPlaylistModal, setShowPlaylistModal] = useState(false);
   const [isDownloaded, setIsDownloaded] = useState(false);
   const [showCloudTranscode, setShowCloudTranscode] = useState(false);
@@ -779,6 +781,17 @@ export function MediaDetailsModal({
                     <Wrench size={15} />
                   </button>
 
+                  {((item.libraryType as string) === "adult" ||
+                    libraries.find((l) => l.id === item.libraryId)?.type === "adult") && (
+                    <button
+                      onClick={() => setShowFingerprintModal(true)}
+                      className="flex items-center justify-center w-10 h-10 rounded-xl bg-panel border border-border text-accent hover:text-bright hover:bg-accent/20 hover:border-accent/40 transition-colors"
+                      title="Identify by Fingerprint (OSHASH / Stash-Box)"
+                    >
+                      <Sparkles size={15} />
+                    </button>
+                  )}
+
                   {/* Search on Easynews */}
                   <button
                     onClick={() => setShowEasynewsSearch(true)}
@@ -1138,6 +1151,9 @@ export function MediaDetailsModal({
             </div>
           </div>
         )}
+      {showFingerprintModal && (
+        <FingerprintIdentifyModal item={item} onClose={() => setShowFingerprintModal(false)} />
+      )}
       </div>
     </AnimatePresence>,
     document.body
