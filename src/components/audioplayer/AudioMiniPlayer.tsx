@@ -492,6 +492,22 @@ export function AudioMiniPlayer({ playlist, playlistIndex: initialIndex, playTok
         return targetUrl;
       }
 
+      // 2b. Catbox.moe public hotlink
+      const catboxVer = track.versions?.find(
+        (v) =>
+          (v.sourceType === ("catbox" as any) || v.remoteName === "catbox") &&
+          v.shareUrl?.startsWith("https://files.catbox.moe/")
+      );
+      if (catboxVer?.shareUrl) {
+        if (!options?.isPrefetch) {
+          setIsLocal(false);
+          setActiveSourceType("remote");
+          setActiveRemoteName("Catbox.moe");
+          setDropmbShareUrl(null);
+        }
+        return catboxVer.shareUrl;
+      }
+
       // 3. Direct web stream / Internet radio / audio bookmark
       const effectivePath = defVersion.remotePath || track.remotePath;
       if (effectivePath.startsWith("http://") || effectivePath.startsWith("https://")) {

@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { TagFilterStrip } from "../../components/common/TagFilterStrip";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, RefreshCw, Sparkles, SortAsc, MoreVertical, Wrench, Tv, Info } from "lucide-react";
 import { useAppStore, selectTvShows, type TvShow } from "../../store/appStore";
@@ -21,6 +22,16 @@ export function TvLibraryPage() {
     return (localStorage.getItem("rcloneflix_sort_tv") as TvSortKey) || "addedAt";
   });
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTag = searchParams.get("tag");
+  const [allLibrariesWithTag, setAllLibrariesWithTag] = useState(false);
+  const [bulkMode, setBulkMode] = useState(false);
+  const [selectedShowIds, setSelectedShowIds] = useState<string[]>([]);
+
+  const tvItems = useMemo(
+    () => Object.values(mediaItems).filter((i) => i.libraryType === "tv"),
+    [mediaItems]
+  );
 
   const handleSortChange = (newSort: TvSortKey) => {
     setSort(newSort);
@@ -57,6 +68,11 @@ export function TvLibraryPage() {
 
   const filtered = useMemo(() => {
     let list = shows;
+    if (activeTag) {
+      list = list.filter((s) =>
+        Object.values(s.seasons).some((sn) => sn.episodes.some((ep) => ep.userTags?.includes(activeTag)))
+      );
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter((s) => s.title.toLowerCase().includes(q));
@@ -74,7 +90,14 @@ export function TvLibraryPage() {
           return (showAddedAtMap.get(b.showId) ?? 0) - (showAddedAtMap.get(a.showId) ?? 0);
       }
     });
-  }, [shows, search, sort, showAddedAtMap]);
+  }, [shows, activeTag, search, sort, showAddedAtMap]);
+
+  const selectedEpisodeIds = useMemo(() => {
+    const idSet = new Set(selectedShowIds);
+    return shows
+      .filter((s) => idSet.has(s.showId))
+      .flatMap((s) => Object.values(s.seasons).flatMap((sn) => sn.episodes.map((ep) => ep.id)));
+  }, [shows, selectedShowIds]);
 
   // Continue watching - TV episodes only
   const inProgress = useMemo(() => {
@@ -180,12 +203,65 @@ export function TvLibraryPage() {
           </div>
         </div>
 
+        <TagFilterStrip
+          items={tvItems}
+          activeTag={activeTag}
+          onSelectTag={(t) => {
+            if (t) setSearchParams({ tag: t });
+            else {
+              setSearchParams({});
+              setAllLibrariesWithTag(false);
+            }
+          }}
+          allLibraries={allLibrariesWithTag}
+          onToggleAllLibraries={() => {
+            if (!allLibrariesWithTag && activeTag) {
+              navigate(`/movies?tag=${encodeURIComponent(activeTag)}`);
+            } else {
+              setAllLibrariesWithTag((v) => !v);
+            }
+          }}
+          bulkMode={bulkMode}
+          onToggleBulkMode={() => {
+            setBulkMode((v) => !v);
+            setSelectedShowIds([]);
+          }}
+          selectedIds={selectedEpisodeIds}
+          onClearSelection={() => {
+            setSelectedShowIds([]);
+            setBulkMode(false);
+          }}
+        />
+
         {/* Shows grid */}
         {filtered.length === 0 ? (
           <div className="px-8 py-16 text-center">
             <p className="text-subtle font-body text-sm">
-              {search ? `No shows matching "${search}"` : "No TV shows yet. Run a scan to populate this library."}
+              {search || activeTag ? `No shows matching filter` : "No TV shows yet. Run a scan to populate this library."}
             </p>
+          </div>
+        ) : bulkMode ? (
+          <div className="px-8 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3 pb-8">
+            {filtered.map((show) => {
+              const sel = selectedShowIds.includes(show.showId);
+              return (
+                <button
+                  key={show.showId}
+                  type="button"
+                  onClick={() =>
+                    setSelectedShowIds((prev) =>
+                      sel ? prev.filter((id) => id !== show.showId) : [...prev, show.showId]
+                    )
+                  }
+                  className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                    sel ? "border-accent bg-accent/15" : "border-border bg-panel hover:border-accent/40"
+                  }`}
+                >
+                  <p className="text-xs font-medium text-bright truncate">{show.title}</p>
+                  <p className="text-[10px] text-subtle mt-0.5">{sel ? "Selected" : "Click to select"}</p>
+                </button>
+              );
+            })}
           </div>
         ) : (
           <div

@@ -4,23 +4,12 @@ import { useCloudTransferStore, dispatchKaggleTransfer, type KaggleTransferReque
 import { useCloudTranscodeStore, dispatchKaggleTranscode, type KaggleTranscodeRequest } from "./kaggleTranscode";
 import { useCloudAlignStore, dispatchKaggleAlign, type KaggleAlignRequest } from "./kaggleAligner";
 import { dispatchKaggleRdSeed, type KaggleRdSeedRequest } from "./realDebridSeeder";
-import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
+import { httpFetch } from "./httpFetch";
+import { ensureGitHubWorkerReady, WorkerSecurityError, DEFAULT_GHA_WORKER_REPO } from "./githubWorkerProvisioner";
 
 export type CloudWorkerProvider = "kaggle" | "github_actions";
 export type ProviderSelection = "auto" | "kaggle" | "github_actions";
 export type CloudJobType = "rclone_transfer" | "video_transcode" | "whisper_align" | "dropmb_offload" | "rd_torrent_seed";
-
-async function httpFetch(url: string, init?: RequestInit): Promise<Response> {
-  if (typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__) {
-    try {
-      const res = await tauriFetch(url as any, init as any);
-      return res as unknown as Response;
-    } catch {
-      // Fallback
-    }
-  }
-  return await window.fetch(url, init);
-}
 
 /**
  * Counts currently running or queued jobs across all Kaggle pipelines.
@@ -207,11 +196,30 @@ export async function dispatchGitHubAction(params: {
     const { token, owner, repo } = acc;
     const workflowFile = acc.workflowFile?.trim() || ghaConfig?.workflowFile?.trim() || "cloud_worker.yml";
     const ref = acc.branch?.trim() || (ghaConfig as any)?.branch?.trim() || "main";
-    const dispatchUrl = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflowFile}/dispatches`;
+
+    let dOwner = owner, dRepo = repo, dRef = ref;
+    try {
+      const ready = await ensureGitHubWorkerReady({
+        token, owner, repo, branch: acc.branch?.trim() || undefined, workflowFile,
+        allowPublic: Boolean((acc as any).allowPublicRepo ?? (ghaConfig as any)?.allowPublicRepo),
+      });
+      dOwner = ready.owner; dRepo = ready.repo; dRef = ready.branch;
+    } catch (e) {
+      const isManagedRepo = !repo || repo.trim().toLowerCase() === DEFAULT_GHA_WORKER_REPO;
+      if (e instanceof WorkerSecurityError || isManagedRepo) {
+        console.warn(`[GHA Multi-Account] Skipping ${acc.label || owner}: ${(e as Error).message}`);
+        lastError = e instanceof Error ? e : new Error(String(e));
+        continue;
+      }
+      // Custom repo: provisioning is best-effort; keep dispatching exactly as before.
+      console.warn(`[GHA Multi-Account] Provision check skipped for ${owner}/${repo}: ${(e as Error).message}`);
+    }
+
+    const dispatchUrl = `https://api.github.com/repos/${dOwner}/${dRepo}/actions/workflows/${workflowFile}/dispatches`;
 
     // Optional proactive check of GitHub Actions billing minutes
     try {
-      const billingRes = await httpFetch(`https://api.github.com/users/${owner}/settings/billing/actions`, {
+      const billingRes = await httpFetch(`https://api.github.com/users/${dOwner}/settings/billing/actions`, {
         headers: {
           Authorization: `Bearer ${token.trim()}`,
           Accept: "application/vnd.github+json",
@@ -220,14 +228,14 @@ export async function dispatchGitHubAction(params: {
       if (billingRes.ok) {
         const billingData = await billingRes.json();
         if (billingData.total_minutes_used >= billingData.included_minutes && billingData.included_minutes > 0) {
-          console.warn(`[GHA Multi-Account] Account ${acc.label || owner} has exhausted monthly free minutes (${billingData.total_minutes_used}/${billingData.included_minutes}). Rotating to next account...`);
+          console.warn(`[GHA Multi-Account] Account ${acc.label || dOwner} has exhausted monthly free minutes (${billingData.total_minutes_used}/${billingData.included_minutes}). Rotating to next account...`);
           continue;
         }
       }
     } catch {}
 
     const body = {
-      ref,
+      ref: dRef,
       inputs: {
         job_type: params.jobType,
         payload: typeof params.payload === "string" ? params.payload : JSON.stringify(params.payload),
@@ -245,7 +253,7 @@ export async function dispatchGitHubAction(params: {
       let preMaxId = 0;
       try {
         const preRes = await httpFetch(
-          `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflowFile}/runs?per_page=1`,
+          `https://api.github.com/repos/${dOwner}/${dRepo}/actions/workflows/${workflowFile}/runs?per_page=1`,
           { headers: ghHeaders }
         );
         if (preRes.ok) {
@@ -263,13 +271,13 @@ export async function dispatchGitHubAction(params: {
       if (!res.ok && res.status !== 204) {
         const errorBody = await res.text();
         if (res.status === 403 || res.status === 429 || errorBody.toLowerCase().includes("billing") || errorBody.toLowerCase().includes("quota")) {
-          console.warn(`[GHA Multi-Account] Quota/permission error on ${acc.label || owner} (HTTP ${res.status}): ${errorBody}. Rotating to next candidate...`);
+          console.warn(`[GHA Multi-Account] Quota/permission error on ${acc.label || dOwner} (HTTP ${res.status}): ${errorBody}. Rotating to next candidate...`);
           lastError = new Error(`HTTP ${res.status}: ${errorBody}`);
           continue;
         }
         if (res.status === 404) {
           throw new Error(
-            `Failed to dispatch GitHub Action (HTTP 404): Workflow '${workflowFile}' not found in '${owner}/${repo}' on branch '${ref}'. Please verify that '.github/workflows/${workflowFile}' is committed and pushed with 'workflow_dispatch' trigger enabled.`
+            `Failed to dispatch GitHub Action (HTTP 404): Workflow '${workflowFile}' not found in '${dOwner}/${dRepo}' on branch '${dRef}'. Please verify that '.github/workflows/${workflowFile}' is committed and pushed with 'workflow_dispatch' trigger enabled.`
           );
         }
         throw new Error(`Failed to dispatch GitHub Action (HTTP ${res.status}): ${errorBody}`);
@@ -278,12 +286,12 @@ export async function dispatchGitHubAction(params: {
       // Resolve the run this dispatch just created: the oldest unclaimed run with
       // id > preMaxId on this workflow. Usually appears within a couple of seconds.
       let workflowRunId: number | undefined;
-      let htmlUrl = `https://github.com/${owner}/${repo}/actions`;
+      let htmlUrl = `https://github.com/${dOwner}/${dRepo}/actions`;
       for (let attempt = 0; attempt < 6 && !workflowRunId; attempt++) {
         await new Promise((r) => setTimeout(r, 2000));
         try {
           const listRes = await httpFetch(
-            `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflowFile}/runs?per_page=10`,
+            `https://api.github.com/repos/${dOwner}/${dRepo}/actions/workflows/${workflowFile}/runs?per_page=10`,
             { headers: ghHeaders }
           );
           if (!listRes.ok) continue;
@@ -300,20 +308,20 @@ export async function dispatchGitHubAction(params: {
         } catch {}
       }
       if (workflowRunId) {
-        pendingGhaRuns.push({ runId: workflowRunId, owner, repo, htmlUrl, resolvedAt: Date.now() });
+        pendingGhaRuns.push({ runId: workflowRunId, owner: dOwner, repo: dRepo, htmlUrl, resolvedAt: Date.now() });
       }
 
       return {
         runUrl: htmlUrl,
         status: "queued",
         workflowRunId,
-        ghaOwner: owner,
-        ghaRepo: repo,
+        ghaOwner: dOwner,
+        ghaRepo: dRepo,
       };
     } catch (err: any) {
       lastError = err;
       if (idx < candidates.length - 1) {
-        console.warn(`[GHA Multi-Account] Error with account ${acc.label || owner}, attempting next account...`);
+        console.warn(`[GHA Multi-Account] Error with account ${acc.label || dOwner}, attempting next account...`);
         continue;
       }
     }
@@ -610,7 +618,77 @@ export async function dispatchCloudTask(params: {
     }
   }
 
-  const { provider, reason } = pickCloudWorkerProvider(params.providerOverride);
+  // Telegram-as-Source resolution & chunking (GHA only; Copy only)
+  const srcLower = String(params.payload?.source || params.payload?.source_input || "").toLowerCase();
+  const isSourceTelegram =
+    srcLower.startsWith("telegram:") ||
+    srcLower.startsWith("telegram-drive:") ||
+    srcLower.startsWith("tg-native:");
+  if (isSourceTelegram && typeof params.payload === "object" && params.payload !== null) {
+    if (params.payload.operation === "move" || params.payload.delete_original) {
+      throw new Error("Moving files out of Telegram Drive is not supported yet — use Copy.");
+    }
+    const { ghaConfig, ghaAccounts, telegramConfig } = useAppStore.getState();
+    const hasGha = Boolean(
+      (ghaAccounts && ghaAccounts.some((a) => a.enabled !== false)) ||
+        (ghaConfig?.enabled && ghaConfig?.token?.trim())
+    );
+    if (!hasGha) {
+      throw new Error("Telegram Drive as a source requires the GitHub Actions worker.");
+    }
+    const { invoke } = await import("@tauri-apps/api/core");
+    const tgEntries = await invoke<Array<{ msgId: number; chatId: string; relPath: string; name: string }>>(
+      "telegram_resolve_source_entries",
+      {
+        sourcePath: params.payload.source || params.payload.source_input,
+        batchItems: Array.isArray(params.payload.batch_items) ? params.payload.batch_items : null,
+      }
+    );
+    params.payload.telegram_bot_token = params.payload.telegram_bot_token || telegramConfig?.botToken?.trim() || undefined;
+    params.payload.telegram_chat_id = params.payload.telegram_chat_id || telegramConfig?.chatId?.trim() || undefined;
+    params.payload.telegram_api_id = params.payload.telegram_api_id || telegramConfig?.apiId?.trim() || undefined;
+    params.payload.telegram_api_hash = params.payload.telegram_api_hash || telegramConfig?.apiHash?.trim() || undefined;
+
+    const CHUNK = 80;
+    if (tgEntries.length > CHUNK) {
+      const totalChunks = Math.ceil(tgEntries.length / CHUNK);
+      let firstResult: {
+        provider: CloudWorkerProvider;
+        jobId: string;
+        url: string;
+        kernelSlug?: string;
+        status: string;
+        reason: string;
+      } | null = null;
+      for (let i = 0; i < totalChunks; i++) {
+        const slice = tgEntries.slice(i * CHUNK, (i + 1) * CHUNK);
+        const chunkPayload = {
+          ...params.payload,
+          telegram_source_items: slice.map((e) => [e.msgId, e.chatId, e.relPath]),
+        };
+        const res = await dispatchGitHubAction({ jobType: params.jobType, payload: chunkPayload });
+        const ghaJobId = `gha-${Date.now()}-${i + 1}`;
+        initGitHubActionsPoller();
+        if (!firstResult) {
+          firstResult = {
+            provider: "github_actions",
+            jobId: ghaJobId,
+            kernelSlug: ghaJobId,
+            url: res.runUrl,
+            status: res.status,
+            reason: `Telegram source chunked (${i + 1}/${totalChunks})`,
+          };
+        }
+      }
+      useToastStore.getState().addToast(`Started ${totalChunks} cloud jobs for ${tgEntries.length} files`, "info");
+      return firstResult!;
+    }
+    params.payload.telegram_source_items = tgEntries.map((e) => [e.msgId, e.chatId, e.relPath]);
+  }
+
+  const picked = pickCloudWorkerProvider(params.providerOverride);
+  const provider = isSourceTelegram ? "github_actions" : picked.provider;
+  const reason = isSourceTelegram ? "Telegram source requires GitHub Actions worker" : picked.reason;
 
   if (provider === "github_actions") {
     const res = await dispatchGitHubAction({

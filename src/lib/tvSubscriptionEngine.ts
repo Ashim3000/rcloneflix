@@ -61,6 +61,174 @@ function rankByReleaseGroups<T>(
 }
 
 /**
+ * Parse a YYYY-MM-DD release date from titles containing YY.MM.DD, YYYY.MM.DD, or YYYY-MM-DD.
+ */
+function parseDatedSceneRelease(title: string): string | null {
+  const m4 = title.match(/\b((?:19|20)\d{2})[.\-_](\d{2})[.\-_](\d{2})\b/);
+  if (m4) return `${m4[1]}-${m4[2]}-${m4[3]}`;
+  const m2 = title.match(/\b(\d{2})[.\-_](\d{2})[.\-_](\d{2})\b/);
+  if (m2) {
+    const yy = parseInt(m2[1], 10);
+    const mm = parseInt(m2[2], 10);
+    const dd = parseInt(m2[3], 10);
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      const yyyy = yy >= 70 ? 1900 + yy : 2000 + yy;
+      return `${yyyy}-${m2[2]}-${m2[3]}`;
+    }
+  }
+  return null;
+}
+
+async function checkDatedSceneSubscription(
+  sub: TvSubscription
+): Promise<{ grabbed: string[]; checkedCount: number }> {
+  const state = useAppStore.getState();
+  const maxBytes = (sub.maxSizeGb || 6) * 1024 * 1024 * 1024;
+  const lastDate = sub.lastGrabbedDate || "";
+  const queryStr = sanitizeEasynewsQuery(sub.seriesTitle);
+
+  type Candidate = {
+    title: string;
+    date: string;
+    url: string;
+    ext: string;
+    isLocalOnly: boolean;
+  };
+  const candidates: Candidate[] = [];
+
+  const wantEasynews =
+    (sub.preferredSource === "auto" || sub.preferredSource === "easynews") &&
+    Boolean(state.easynewsConfig?.username && state.easynewsConfig?.password);
+  const wantInfinidysk =
+    sub.preferredSource === "auto" || sub.preferredSource === "infinidysk";
+
+  if (wantEasynews) {
+    try {
+      const enRes = await searchEasynews(queryStr, "video", "relevance", sub.maxSizeGb || 6);
+      for (const r of enRes.results) {
+        if (r.sizeBytes > maxBytes) continue;
+        if (!matchesQualityProfile(r.resolution, sub.qualityProfile)) continue;
+        const d = parseDatedSceneRelease(r.filename);
+        if (!d || d <= lastDate) continue;
+        if (r.dlUrl) {
+          candidates.push({
+            title: r.filename,
+            date: d,
+            url: buildAuthenticatedEasynewsUrl(r.dlUrl),
+            ext: r.extension?.replace(/^\./, "") || "mp4",
+            isLocalOnly: false,
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("Easynews dated_scene search failed:", e);
+    }
+  }
+
+  if (wantInfinidysk && candidates.length === 0) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const nzbResp = await invoke<{
+        results: { title: string; size_bytes: number; nzb_url: string }[];
+      }>("search_usenet_indexers", {
+        query: queryStr,
+        omgUser: localStorage.getItem("rcloneflix_omg_user") || undefined,
+        omgApiKey: localStorage.getItem("rcloneflix_omg_key") || undefined,
+        enableNzbindex: true,
+      });
+      for (const r of nzbResp?.results || []) {
+        if (r.size_bytes && r.size_bytes > maxBytes) continue;
+        const d = parseDatedSceneRelease(r.title);
+        if (!d || d <= lastDate || !r.nzb_url) continue;
+        const cleanSite = sub.seriesTitle.replace(/[\\/:]/g, "-").replace(/\s+/g, " ").trim();
+        const playables = await invoke<{ name: string; size: number; virtual_path?: string | null }[]>(
+          "parse_nzb_media_files",
+          {
+            nzbXml: null,
+            nzbUrl: r.nzb_url,
+            password: null,
+            virtualDir: `Adult/${cleanSite}`,
+          }
+        );
+        const best = [...(playables || [])].sort((a, b) => b.size - a.size)[0];
+        if (best?.name) {
+          const davPath = (best.virtual_path || best.name).split("/").map(encodeURIComponent).join("/");
+          candidates.push({
+            title: r.title,
+            date: d,
+            url: `http://127.0.0.1:8553/dav/${davPath}`,
+            ext: best.name.split(".").pop()?.toLowerCase() || "mp4",
+            isLocalOnly: true,
+          });
+          break;
+        }
+      }
+    } catch {}
+  }
+
+  if (candidates.length === 0) {
+    return { grabbed: [], checkedCount: 1 };
+  }
+
+  candidates.sort((a, b) => b.date.localeCompare(a.date));
+  const pick = candidates[0];
+  const targetFolder = sub.destinationRemotePath.replace(/\/+$/, "");
+  const cleanTitle = pick.title.replace(/[\\/:*?"<>|]/g, "").trim();
+  const effectiveTranscode = sub.transcodeToMp4 && !pick.isLocalOnly;
+  const targetFilename = `${cleanTitle}.${effectiveTranscode ? "mp4" : pick.ext}`;
+
+  if (effectiveTranscode) {
+    const jobId = `sub-scene-${Date.now()}`;
+    const res = await dispatchCloudTask({
+      jobType: "video_transcode",
+      title: `${sub.seriesTitle} ${pick.date}`,
+      payload: {
+        job_id: jobId,
+        source_input: pick.url,
+        dest_remote_folder: targetFolder,
+        delete_original: false,
+        output_filename: targetFilename,
+        crf: 23,
+        preset: 6,
+        max_height: sub.qualityProfile === "720p" ? 720 : 1080,
+        rclone_config_snippet: state.rcloneConfigContent,
+      },
+    });
+    useCloudTranscodeStore.getState().addJob({
+      id: res.jobId,
+      title: `${sub.seriesTitle} ${pick.date}`,
+      kernelSlug: res.kernelSlug || res.jobId,
+      kernelUrl: res.url,
+      sourceInput: pick.url,
+      destRemoteFolder: targetFolder,
+      targetFilename,
+      targetLibraryId: sub.libraryId,
+      targetLibraryType: "adult",
+      deleteOriginal: false,
+      status: "queued",
+      startedAt: Date.now(),
+      provider: res.provider,
+    });
+  } else {
+    const dlId = `sub-scene-dl-${Date.now()}`;
+    await downloadWebStream({
+      download_id: dlId,
+      stream_url: pick.url,
+      filename: targetFilename,
+      remote_upload_path: targetFolder,
+      config_path: state.rcloneConfigPath,
+    });
+  }
+
+  state.upsertTvSubscription({
+    ...sub,
+    lastGrabbedDate: pick.date,
+    lastCheckedAt: Date.now(),
+  });
+  return { grabbed: [pick.date], checkedCount: 1 };
+}
+
+/**
  * Checks a single TV subscription for missing aired episodes and grabs the next missing episode.
  * Processes up to `maxEpisodesPerRun` per invocation to respect worker concurrency limits.
  */
@@ -68,6 +236,9 @@ export async function checkSingleTvSubscription(
   sub: TvSubscription,
   maxEpisodesPerRun = 1
 ): Promise<{ grabbed: string[]; checkedCount: number }> {
+  if (sub.subscriptionKind === "dated_scene") {
+    return checkDatedSceneSubscription(sub);
+  }
   const state = useAppStore.getState();
   const canonical = await fetchCanonicalSeriesEpisodes(sub.seriesTitle, sub.imdbId || sub.seriesId);
   if (!canonical || canonical.episodes.length === 0) {

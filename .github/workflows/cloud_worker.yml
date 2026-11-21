@@ -1,3 +1,4 @@
+# rcloneflix-managed-workflow
 name: Cloud Worker (RcloneFlix Offload & Transcoder)
 
 on:
@@ -85,6 +86,39 @@ jobs:
               ], check=True)
               return dest_path
 
+          def stage_from_telegram_mtproto(tg_items, stage_dir, api_id, api_hash, bot_token, default_chat):
+              if not (api_id and api_hash and bot_token):
+                  raise RuntimeError("Telegram API ID, API Hash, and Bot Token are required to download from telegram-drive:")
+              subprocess.run([sys.executable, "-m", "pip", "install", "-q", "telethon", "cryptg"], check=True)
+              import asyncio
+              from telethon import TelegramClient
+
+              async def _dl():
+                  client = TelegramClient("/tmp/rflix_tg_src", int(api_id), api_hash)
+                  await client.start(bot_token=bot_token)
+                  staged = []
+                  for item in tg_items:
+                      msg_id, chat_id, rel_path = int(item[0]), str(item[1] or default_chat), str(item[2])
+                      entity = int(chat_id) if chat_id.lstrip("-").isdigit() else chat_id
+                      msg = await client.get_messages(entity, ids=msg_id)
+                      if not msg or not getattr(msg, "media", None):
+                          raise RuntimeError(
+                              f"Telegram bot could not fetch message {msg_id} in chat {chat_id}. Ensure your bot is a member/admin of that channel."
+                          )
+                      safe_rel = os.path.normpath(rel_path).lstrip("/\\")
+                      if safe_rel.startswith(".."):
+                          safe_rel = os.path.basename(safe_rel)
+                      dest_fp = os.path.join(stage_dir, safe_rel)
+                      os.makedirs(os.path.dirname(dest_fp), exist_ok=True)
+                      print(f"📥 [Telegram MTProto] Downloading msg {msg_id} -> {dest_fp}...")
+                      await client.download_media(msg, file=dest_fp)
+                      if os.path.exists(dest_fp) and os.path.getsize(dest_fp) > 0:
+                          staged.append(dest_fp)
+                  await client.disconnect()
+                  return staged
+
+              return asyncio.run(_dl())
+
           def escape_rclone_glob(s):
               out = []
               for c in str(s):
@@ -170,6 +204,7 @@ jobs:
               is_dest_telegram = dest.lower().startswith("telegram:")
               is_dest_streamtape = dest.lower().startswith("streamtape:")
               is_source_url = source.lower().startswith("http://") or source.lower().startswith("https://")
+              is_source_telegram = source.lower().startswith(("telegram:", "telegram-drive:", "tg-native:"))
               batch_items = payload.get("batch_items") if isinstance(payload.get("batch_items"), list) else []
 
               if is_dest_telegram:
@@ -309,6 +344,8 @@ jobs:
                   os.makedirs(stage_dir, exist_ok=True)
                   if is_source_url:
                       download_url_to_stage(source, stage_dir)
+                  elif is_source_telegram:
+                      stage_from_telegram_mtproto(payload.get("telegram_source_items") or [], stage_dir, tg_api_id, tg_api_hash, tg_token, tg_chat_id)
                   else:
                       stage_cmd = ["rclone", "copy", source, stage_dir, "-v", "--stats", "10s"]
                       apply_batch_filter(stage_cmd, batch_items, source)
@@ -344,6 +381,18 @@ jobs:
                   local_fp = download_url_to_stage(source, stage_dir)
                   cmd = ["rclone", "copy", local_fp, dest, "-v", "--stats", "10s"]
                   print(f"Uploading staged Web URL file to {dest}: {' '.join(cmd)}")
+                  subprocess.run(cmd, check=True)
+                  shutil.rmtree(stage_dir, ignore_errors=True)
+
+              elif is_source_telegram:
+                  stage_dir = "/tmp/stage_tg_src"
+                  os.makedirs(stage_dir, exist_ok=True)
+                  staged = stage_from_telegram_mtproto(payload.get("telegram_source_items") or [], stage_dir, tg_api_id, tg_api_hash, tg_token, tg_chat_id)
+                  if not staged:
+                      print("❌ Cloud Transfer Failed: 0 files were staged from Telegram source!")
+                      sys.exit(1)
+                  cmd = ["rclone", "copy", stage_dir, dest, "-v", "--stats", "10s"]
+                  print(f"Uploading staged Telegram files to {dest}: {' '.join(cmd)}")
                   subprocess.run(cmd, check=True)
                   shutil.rmtree(stage_dir, ignore_errors=True)
 

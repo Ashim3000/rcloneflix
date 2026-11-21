@@ -729,8 +729,8 @@ export function VideoPlayerPage() {
         : activeVersion?.shareUrl &&
             (shareCleanLower.startsWith("doodstream:") ||
               shareCleanLower.startsWith("dropmb:") ||
-              (shareCleanLower.startsWith("streamtape:") &&
-                ((typeof window !== "undefined" && (window as any).Capacitor) || isGuestSharedPath)))
+              shareCleanLower.startsWith("catbox:") ||
+              shareCleanLower.startsWith("streamtape:"))
           ? activeVersion.shareUrl
           : null;
 

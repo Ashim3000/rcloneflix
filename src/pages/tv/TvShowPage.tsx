@@ -6,6 +6,7 @@ import { useAppStore, selectTvShows, type TvShow, type TvEpisode, type MediaItem
 import { useToastStore } from "../../store/toastStore";
 import { downloadSingleItem, downloadSeason } from "../../lib/downloadManager";
 import { FavoriteButton } from "../../components/common/FavoriteButton";
+import { UserTagsEditor } from "../../components/common/UserTagsEditor";
 import { AddToPlaylistButton } from "../../components/playlist/AddToPlaylistButton";
 import { FixMatchModal } from "../../components/library/FixMatchModal";
 import { EasynewsSearchModal } from "../../components/discovery/EasynewsSearchModal";
@@ -428,6 +429,15 @@ export function TvShowPage() {
               <Wrench size={15} className="text-accent" />
               <span>Fix Match</span>
             </button>
+
+            <div className="w-full pt-2">
+              <UserTagsEditor
+                itemIds={allEpisodes.map((e) => e.id)}
+                tags={Array.from(new Set(allEpisodes.flatMap((e) => e.userTags || [])))}
+                libraryType="tv"
+                libraryRoute="/tv"
+              />
+            </div>
 
             {totalMissingEpisodes > 0 ? (
               <button

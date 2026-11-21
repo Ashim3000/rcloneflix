@@ -35,7 +35,7 @@ raw-window-handle = "0.6"
 regex = "1.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 flate2 = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart"] }
 base64 = "0.23.1"
 aes-gcm = "0.10"
 pbkdf2 = "0.12"

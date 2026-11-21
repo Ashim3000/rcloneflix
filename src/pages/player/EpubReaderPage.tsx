@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { httpFetch } from "../../lib/httpFetch";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ChevronLeft,
@@ -243,33 +244,50 @@ export function EpubReaderPage() {
 
     (async () => {
       try {
-        let localPath = await getDownloadedFilePath(item);
-        if (!localPath) {
-          localPath = await invoke<string>("download_book_to_temp", {
-            configPath: rcloneConfigPath,
-            remotePath: item.remotePath,
-            sessionId: sessionId.current,
-          });
-        }
-        if (!mounted) return;
-        setDownloading(false);
-
+        const catboxVer = item.versions?.find(
+          (v) =>
+            (v.sourceType === ("catbox" as any) || v.remoteName === "catbox") &&
+            v.shareUrl?.startsWith("https://files.catbox.moe/")
+        );
         let arrayBuffer: ArrayBuffer | null = null;
-        try {
-          const raw = await invoke<any>("read_binary_file", { filePath: localPath });
-          if (raw instanceof ArrayBuffer) {
-            arrayBuffer = raw;
-          } else if (raw instanceof Uint8Array) {
-            arrayBuffer = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;
-          } else if (Array.isArray(raw)) {
-            arrayBuffer = new Uint8Array(raw).buffer;
-          } else if (raw && typeof raw === "object" && "data" in raw && Array.isArray((raw as any).data)) {
-            arrayBuffer = new Uint8Array((raw as any).data).buffer;
-          } else if (raw && typeof raw === "object" && "body" in raw && Array.isArray((raw as any).body)) {
-            arrayBuffer = new Uint8Array((raw as any).body).buffer;
+        if (catboxVer?.shareUrl) {
+          const resp = await httpFetch(catboxVer.shareUrl);
+          if (resp.ok) {
+            arrayBuffer = await resp.arrayBuffer();
           }
-        } catch (ipcErr) {
-          console.warn("read_binary_file IPC invoke failed, attempting asset protocol fallback:", ipcErr);
+        }
+        let localPath = "";
+        if (!arrayBuffer) {
+          localPath = (await getDownloadedFilePath(item)) || "";
+          if (!localPath) {
+            localPath = await invoke<string>("download_book_to_temp", {
+              configPath: rcloneConfigPath,
+              remotePath: item.remotePath,
+              sessionId: sessionId.current,
+            });
+          }
+          if (!mounted) return;
+          setDownloading(false);
+
+          try {
+            const raw = await invoke<any>("read_binary_file", { filePath: localPath });
+            if (raw instanceof ArrayBuffer) {
+              arrayBuffer = raw;
+            } else if (raw instanceof Uint8Array) {
+              arrayBuffer = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;
+            } else if (Array.isArray(raw)) {
+              arrayBuffer = new Uint8Array(raw).buffer;
+            } else if (raw && typeof raw === "object" && "data" in raw && Array.isArray((raw as any).data)) {
+              arrayBuffer = new Uint8Array((raw as any).data).buffer;
+            } else if (raw && typeof raw === "object" && "body" in raw && Array.isArray((raw as any).body)) {
+              arrayBuffer = new Uint8Array((raw as any).body).buffer;
+            }
+          } catch (ipcErr) {
+            console.warn("read_binary_file IPC invoke failed, attempting asset protocol fallback:", ipcErr);
+          }
+        } else {
+          if (!mounted) return;
+          setDownloading(false);
         }
 
         if (!arrayBuffer) {

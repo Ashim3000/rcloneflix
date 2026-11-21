@@ -374,6 +374,107 @@ pub fn rclone_merge_scoped_config(
     })
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AppliedAdminConfig {
+    pub config_path: String,
+    pub remotes: Vec<RcloneRemote>,
+    pub merged_content: String,
+}
+
+/// Safely applies an Admin Pass rclone configuration:
+/// - Creates the default OS rclone.conf directory if no config file exists yet
+/// - Backs up any existing config file to `<path>.pre_pass_bak` (BEFORE any write)
+/// - Preserves local-only remotes; colliding local remotes are kept as `[<name>_local_backup]`
+/// - Returns the resolved `config_path`, parsed `remotes` and the final merged text
+/// MUST be called WITHOUT a preceding `save_rclone_config_content` (that command overwrites the file).
+#[tauri::command]
+pub fn rclone_apply_admin_config(
+    app: AppHandle,
+    config_path: String,
+    admin_content: String,
+) -> Result<AppliedAdminConfig, String> {
+    let target_path: PathBuf = if !config_path.trim().is_empty() && !config_path.starts_with("android://") {
+        PathBuf::from(config_path.trim())
+    } else if let Some(resolved) = crate::commands::rclone_sync::resolve_config_arg("") {
+        PathBuf::from(resolved)
+    } else if let Ok(appdata) = std::env::var("APPDATA") {
+        PathBuf::from(appdata).join("rclone").join("rclone.conf")
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".config").join("rclone").join("rclone.conf")
+    } else {
+        std::env::temp_dir().join("rcloneflix-rclone.conf")
+    };
+
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create rclone config directory: {}", e))?;
+    }
+
+    let incoming_sections: std::collections::HashSet<String> = admin_content
+        .lines()
+        .filter_map(|line| {
+            let t = line.trim();
+            if t.starts_with('[') && t.ends_with(']') {
+                Some(t[1..t.len() - 1].trim().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut preserved_local = String::new();
+    if target_path.exists() {
+        let existing = std::fs::read_to_string(&target_path)
+            .map_err(|e| format!("Failed to read existing rclone.conf: {}", e))?;
+        if !existing.trim().is_empty() {
+            let bak_path = target_path.with_extension("conf.pre_pass_bak");
+            let _ = std::fs::write(&bak_path, &existing);
+
+            let mut in_section = false;
+            for line in existing.lines() {
+                let t = line.trim();
+                if t.starts_with('[') && t.ends_with(']') {
+                    let sec = t[1..t.len() - 1].trim();
+                    in_section = true;
+                    if incoming_sections.contains(sec) {
+                        preserved_local.push_str(&format!("[{}_local_backup]\n", sec));
+                    } else {
+                        preserved_local.push_str(line);
+                        preserved_local.push('\n');
+                    }
+                    continue;
+                }
+                if in_section {
+                    preserved_local.push_str(line);
+                    preserved_local.push('\n');
+                }
+            }
+        }
+    }
+
+    let mut final_content = admin_content.trim().to_string();
+    final_content.push('\n');
+    if !preserved_local.trim().is_empty() {
+        final_content.push_str("\n# --- Preserved Local Remotes ---\n");
+        final_content.push_str(preserved_local.trim());
+        final_content.push('\n');
+    }
+
+    std::fs::write(&target_path, &final_content)
+        .map_err(|e| format!("Failed to write rclone.conf to {}: {}", target_path.display(), e))?;
+
+    let resolved_str = target_path.to_string_lossy().to_string();
+    let remotes = parse_rclone_config(resolved_str.clone())?;
+
+    let _ = crate::commands::store::set_rclone_config_content_in_store(&app, &final_content);
+
+    Ok(AppliedAdminConfig {
+        config_path: resolved_str,
+        remotes,
+        merged_content: final_content,
+    })
+}
+
 /// Removes specified scoped remotes from the config file.
 #[tauri::command]
 pub fn rclone_remove_scoped_remotes(
@@ -1048,6 +1149,197 @@ pub async fn get_rclone_link(
         return Err(format!("Remote '{}' returned an empty share link", clean_remote));
     }
     Ok(link)
+}
+
+fn mounts_root_dir() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or_else(|| "Could not determine user home directory".to_string())?;
+    Ok(home.join("RcloneFlixMounts"))
+}
+
+/// Remote names come from the frontend over IPC: reject anything that could escape the mounts root.
+fn validate_remote_name(name: &str) -> Result<String, String> {
+    let clean = name.trim().trim_end_matches(':').to_string();
+    if clean.is_empty()
+        || clean.contains('/')
+        || clean.contains('\\')
+        || clean.contains("..")
+        || clean.contains(':')
+    {
+        return Err(format!("Invalid remote name '{}'.", name));
+    }
+    Ok(clean)
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct MountedRemote {
+    pub name: String,
+    pub mount_point: String,
+    /// true when the mount lives under ~/RcloneFlixMounts (created by this app, so it may unmount it).
+    pub managed: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn read_rclone_mounts() -> Vec<MountedRemote> {
+    let root = mounts_root_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut out: Vec<MountedRemote> = Vec::new();
+    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+        return out;
+    };
+    for line in mounts.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(device), Some(mount_point), Some(fs_type)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let mount_point = mount_point.replace("\\040", " "); // /proc/mounts escapes spaces
+        let managed = !root.is_empty() && mount_point.starts_with(&root);
+        if !(fs_type == "fuse.rclone" || (fs_type.starts_with("fuse") && managed)) {
+            continue;
+        }
+        let name = device.split(':').next().unwrap_or("").to_string();
+        if name.is_empty() || out.iter().any(|m| m.mount_point == mount_point) {
+            continue;
+        }
+        out.push(MountedRemote { name, mount_point, managed });
+    }
+    out
+}
+
+/// Lists active rclone FUSE mounts: those the app created (`managed: true`) and external ones
+/// (`managed: false`). The UI shows external mounts as "Mounted (external)" with no Unmount button.
+#[tauri::command]
+pub fn list_mounted_remotes() -> Result<Vec<MountedRemote>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        return Ok(read_rclone_mounts());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+#[tauri::command]
+pub async fn mount_remote(
+    app: AppHandle,
+    config_path: String,
+    remote_name: String,
+) -> Result<String, String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, config_path, remote_name);
+        return Err("FUSE remote mounting from Cloud Explorer is currently supported on Linux desktop.".to_string());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var("FLATPAK_ID").is_ok() {
+            return Err("FUSE mounts cannot be spawned from inside the Flatpak sandbox. Use the .deb build or host systemd mount.".to_string());
+        }
+        let clean_remote = validate_remote_name(&remote_name)?;
+        let mount_dir = mounts_root_dir()?.join(&clean_remote);
+
+        if let Some(m) = read_rclone_mounts()
+            .into_iter()
+            .find(|m| !m.managed && m.name.eq_ignore_ascii_case(&clean_remote))
+        {
+            return Err(format!("'{}' is already mounted at {}.", clean_remote, m.mount_point));
+        }
+
+        // Clear any stale/dead FUSE mount FIRST: create_dir_all fails with
+        // "Transport endpoint is not connected" on a dead mount point.
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", "-z", &mount_dir.to_string_lossy()])
+            .output()
+            .or_else(|_| {
+                std::process::Command::new("fusermount")
+                    .args(["-u", "-z", &mount_dir.to_string_lossy()])
+                    .output()
+            });
+        std::fs::create_dir_all(&mount_dir)
+            .map_err(|e| format!("Failed creating mount directory: {}", e))?;
+
+        let rclone = crate::commands::player::rclone_binary(&app);
+        let cfg_opt = crate::commands::rclone_sync::resolve_config_arg(&config_path);
+
+        let mut cmd = std::process::Command::new(&rclone);
+        if let Some(ref cfg) = cfg_opt {
+            cmd.args(["--config", cfg]);
+        }
+        cmd.args([
+            "mount",
+            &format!("{}:", clean_remote),
+            &mount_dir.to_string_lossy(),
+            "--vfs-cache-mode",
+            "full",
+            "--vfs-cache-max-size",
+            "10G",
+            "--vfs-cache-max-age",
+            "24h",
+            "--dir-cache-time",
+            "5m",
+            "--poll-interval",
+            "15s",
+            "--umask",
+            "002",
+            "--daemon",
+        ]);
+
+        // Enforce guest pass read-only security boundary
+        if clean_remote.starts_with("shared_") {
+            cmd.arg("--read-only");
+        }
+
+        let out = cmd.output().map_err(|e| format!("Failed to launch rclone mount: {}", e))?;
+        if !out.status.success() {
+            return Err(format!(
+                "rclone mount failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(mount_dir.to_string_lossy().to_string())
+    }
+}
+
+#[tauri::command]
+pub fn unmount_remote(remote_name: String) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let clean_remote = validate_remote_name(&remote_name)?;
+        let Some(m) = read_rclone_mounts()
+            .into_iter()
+            .find(|m| m.name.eq_ignore_ascii_case(&clean_remote) && m.managed)
+        else {
+            if let Some(ext) = read_rclone_mounts()
+                .into_iter()
+                .find(|m| m.name.eq_ignore_ascii_case(&clean_remote))
+            {
+                return Err(format!(
+                    "'{}' is mounted at {}, outside RcloneFlix. Unmount it where it was created (e.g. its systemd unit or `fusermount3 -u {}`).",
+                    clean_remote, ext.mount_point, ext.mount_point
+                ));
+            }
+            return Ok(());
+        };
+        let status = std::process::Command::new("fusermount3")
+            .args(["-u", "-z", &m.mount_point])
+            .status()
+            .or_else(|_| {
+                std::process::Command::new("fusermount")
+                    .args(["-u", "-z", &m.mount_point])
+                    .status()
+            })
+            .map_err(|e| format!("Failed running fusermount: {}", e))?;
+        if !status.success() {
+            return Err(format!("Could not unmount {}", m.mount_point));
+        }
+    }
+    Ok(())
 }
 
 

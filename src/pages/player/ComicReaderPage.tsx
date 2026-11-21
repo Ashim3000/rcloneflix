@@ -286,7 +286,12 @@ export function ComicReaderPage() {
         // PATH B: Instant HTTP-Range ZIP/CBZ Streaming (Cloud Remotes & Archive.org direct .cbz URLs)
         const downloadedLocal = await getDownloadedFilePath(item);
         if (!downloadedLocal) {
-          let candidateStreamUrl = item.streamUrl || (isHttpUrl ? remoteTarget : "");
+          const catboxVer = item.versions?.find(
+            (v) =>
+              (v.sourceType === ("catbox" as any) || v.remoteName === "catbox") &&
+              v.shareUrl?.startsWith("https://files.catbox.moe/")
+          );
+          let candidateStreamUrl = catboxVer?.shareUrl || item.streamUrl || (isHttpUrl ? remoteTarget : "");
           if (!candidateStreamUrl && remoteTarget.includes(":")) {
             setStatusText("Connecting to cloud stream...");
             const colonIdx = remoteTarget.indexOf(":");

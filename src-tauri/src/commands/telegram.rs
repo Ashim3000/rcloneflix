@@ -1749,3 +1749,77 @@ pub async fn telegram_import_desktop_app() -> Result<TelegramDriveDesktopStatus,
     telegram_get_desktop_status().await
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedTelegramSourceItem {
+    #[serde(rename = "msgId")]
+    pub msg_id: i32,
+    #[serde(rename = "chatId")]
+    pub chat_id: String,
+    #[serde(rename = "relPath")]
+    pub rel_path: String,
+    pub name: String,
+    pub size: u64,
+}
+
+#[tauri::command]
+pub async fn telegram_resolve_source_entries(
+    source_path: String,
+    batch_items: Option<Vec<String>>,
+) -> Result<Vec<ResolvedTelegramSourceItem>, String> {
+    let clean = source_path
+        .split_once(':')
+        .map(|(_, p)| p)
+        .unwrap_or(&source_path)
+        .trim_matches('/');
+
+    let engine = get_engine();
+    let idx = engine.index.read().await;
+    if idx.entries.is_empty() {
+        return Err("Telegram Drive index is empty. Please sync Telegram Drive first.".to_string());
+    }
+
+    let batch_set: Option<std::collections::HashSet<String>> = batch_items
+        .filter(|b| !b.is_empty())
+        .map(|b| b.into_iter().map(|s| s.trim_matches('/').to_string()).collect());
+
+    let mut out = Vec::new();
+    for entry in &idx.entries {
+        let ep = entry.path.trim_matches('/');
+        let matches_source = clean.is_empty()
+            || ep == clean
+            || ep.starts_with(&format!("{}/", clean));
+        if !matches_source {
+            continue;
+        }
+        let rel = if clean.is_empty() {
+            ep.to_string()
+        } else if ep == clean {
+            entry.name.clone()
+        } else {
+            ep.strip_prefix(&format!("{}/", clean)).unwrap_or(&entry.name).to_string()
+        };
+        if let Some(ref bset) = batch_set {
+            let top_seg = rel.split('/').next().unwrap_or(&rel);
+            if !bset.contains(&rel) && !bset.contains(top_seg) && !bset.contains(ep) {
+                continue;
+            }
+        }
+        out.push(ResolvedTelegramSourceItem {
+            msg_id: entry.msg_id,
+            chat_id: entry.chat_id.clone(),
+            rel_path: rel,
+            name: entry.name.clone(),
+            size: entry.size,
+        });
+    }
+
+    if out.is_empty() {
+        let last_ts = idx.entries.iter().map(|e| e.updated_at).max().unwrap_or(0);
+        return Err(format!(
+            "No Telegram files matched source path '{}' (last Telegram sync timestamp: {}). Try re-syncing Telegram Drive.",
+            source_path, last_ts
+        ));
+    }
+    Ok(out)
+}
+

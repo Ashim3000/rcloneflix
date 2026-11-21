@@ -1,5 +1,7 @@
-use std::path::Path;
-use crate::process_ext::std_command;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Manager};
+use crate::process_ext::{std_command, tokio_command};
 
 /// Extracts an archive (.zip, .rar, .tar, .tar.gz) into destination_dir
 #[tauri::command]
@@ -1242,6 +1244,229 @@ pub async fn fetch_remote_comic_cover(stream_url: String) -> Result<String, Stri
         .next()
         .ok_or_else(|| "No pages found in comic".to_string())?;
     fetch_remote_comic_page(stream_url, first, None).await
+}
+
+const MAX_EXTRACT_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB extracted
+const MAX_ARCHIVE_BYTES: u64 = 20 * 1024 * 1024 * 1024; // 20 GiB source archive
+
+struct DirGuard(PathBuf);
+impl Drop for DirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn archive_stem(filename: &str) -> String {
+    let lower = filename.to_lowercase();
+    for suf in [".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".zip", ".rar", ".7z", ".tar"] {
+        if lower.ends_with(suf) {
+            return filename[..filename.len() - suf.len()].trim().to_string();
+        }
+    }
+    filename
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(filename)
+        .trim()
+        .to_string()
+}
+
+fn dir_size(p: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = std::fs::read_dir(p) {
+        for e in rd.flatten() {
+            let Ok(md) = e.metadata() else { continue };
+            if md.is_dir() {
+                total = total.saturating_add(dir_size(&e.path()));
+            } else {
+                total = total.saturating_add(md.len());
+            }
+        }
+    }
+    total
+}
+
+/// Extracts a ZIP in-process. Returns Ok(true) if extracted, Ok(false) if the file is not a ZIP.
+fn extract_zip_safely(archive: &Path, out_dir: &Path) -> Result<bool, String> {
+    let mut f = std::fs::File::open(archive).map_err(|e| e.to_string())?;
+    let mut magic = [0u8; 4];
+    let n = f.read(&mut magic).map_err(|e| e.to_string())?;
+    let looks_zip = n == 4 && &magic == b"PK\x03\x04";
+    let name_zip = archive
+        .to_string_lossy()
+        .to_lowercase()
+        .ends_with(".zip");
+    if !looks_zip && !name_zip {
+        return Ok(false);
+    }
+    let f = std::fs::File::open(archive).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(f).map_err(|e| format!("Invalid ZIP archive: {}", e))?;
+    let mut total_written = 0u64;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
+        if entry.is_dir() {
+            continue;
+        }
+        let Some(rel_path) = entry.enclosed_name().map(|p| p.to_path_buf()) else {
+            continue; // blocks Zip-Slip traversal
+        };
+        if rel_path.to_string_lossy().contains("__MACOSX") {
+            continue;
+        }
+        let target = out_dir.join(rel_path);
+        if let Some(p) = target.parent() {
+            std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+        }
+        let mut out_f = std::fs::File::create(&target).map_err(|e| e.to_string())?;
+        // Count bytes ACTUALLY written; never trust the declared entry size.
+        let remaining = MAX_EXTRACT_BYTES.saturating_sub(total_written);
+        let mut limited = (&mut entry).take(remaining.saturating_add(1));
+        let written = std::io::copy(&mut limited, &mut out_f).map_err(|e| e.to_string())?;
+        out_f.flush().ok();
+        total_written = total_written.saturating_add(written);
+        if total_written > MAX_EXTRACT_BYTES {
+            return Err("Archive exceeds the 10 GB extraction safety limit.".to_string());
+        }
+    }
+    Ok(true)
+}
+
+/// Downloads a remote archive (.zip, .rar, .7z, .tar, .tar.gz, .tgz) into the app cache dir,
+/// extracts it safely and uploads the extracted folder back to `dest_remote_dir`.
+#[tauri::command]
+pub async fn extract_remote_archive_to_remote(
+    app: AppHandle,
+    config_path: String,
+    source_remote_path: String,
+    dest_remote_dir: String,
+) -> Result<String, String> {
+    if source_remote_path.starts_with("shared_") || dest_remote_dir.starts_with("shared_") {
+        return Err("Guest pass remotes are read-only.".to_string());
+    }
+    let filename = source_remote_path
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or("archive.zip")
+        .to_string();
+    let lower = filename.to_lowercase();
+    let stem = archive_stem(&filename);
+
+    if lower.ends_with(".rar") || lower.ends_with(".7z") {
+        let has_unrar = std_command("unrar").arg("-v").output().is_ok();
+        let has_7z = std_command("7z").arg("i").output().is_ok();
+        if !has_unrar && !has_7z {
+            return Err(
+                "Extracting .rar or .7z archives requires '7z' or 'unrar' to be installed on your system. (.zip archives are extracted natively.)"
+                    .to_string(),
+            );
+        }
+    }
+
+    let rclone = crate::commands::player::rclone_binary(&app);
+    let cfg_opt = crate::commands::rclone_sync::resolve_config_arg(&config_path);
+
+    // 0. Refuse oversized sources BEFORE downloading anything.
+    let mut size_cmd = tokio_command(&rclone);
+    if let Some(ref cfg) = cfg_opt {
+        size_cmd.args(["--config", cfg]);
+    }
+    size_cmd.args(["size", "--json", &source_remote_path]);
+    if let Ok(o) = size_cmd.output().await {
+        if o.status.success() {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&o.stdout) {
+                if v.get("bytes").and_then(|b| b.as_u64()).unwrap_or(0) > MAX_ARCHIVE_BYTES {
+                    return Err("Archive is larger than the 20 GB limit for in-app extraction.".to_string());
+                }
+            }
+        }
+    }
+
+    let work_id = format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let cache_root = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("No app cache dir: {}", e))?
+        .join("extract");
+    let work_dir = cache_root.join(&work_id);
+    let local_archive = work_dir.join(&filename);
+    let out_dir = work_dir.join("out");
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("Failed creating work dir: {}", e))?;
+    let _guard = DirGuard(work_dir.clone()); // removes work_dir on every exit path
+
+    // 1. Download archive from remote
+    let mut dl_cmd = tokio_command(&rclone);
+    if let Some(ref cfg) = cfg_opt {
+        dl_cmd.args(["--config", cfg]);
+    }
+    dl_cmd.args(["copyto", &source_remote_path, &local_archive.to_string_lossy()]);
+    let dl_out = dl_cmd
+        .output()
+        .await
+        .map_err(|e| format!("rclone download failed: {}", e))?;
+    if !dl_out.status.success() {
+        return Err(format!(
+            "Failed downloading archive: {}",
+            String::from_utf8_lossy(&dl_out.stderr)
+        ));
+    }
+
+    // 2. Extract: native ZIP first; everything else via the existing extract_archive (7z/unrar/tar)
+    let archive_clone = local_archive.clone();
+    let out_clone = out_dir.clone();
+    let zip_done = tokio::task::spawn_blocking(move || extract_zip_safely(&archive_clone, &out_clone))
+        .await
+        .map_err(|e| e.to_string())??;
+
+    if !zip_done {
+        extract_archive(
+            local_archive.to_string_lossy().to_string(),
+            out_dir.to_string_lossy().to_string(),
+        )
+        .await?;
+    }
+    let _ = std::fs::remove_file(&local_archive);
+
+    // Post-extraction cap (covers the external-tool paths that bypass the in-process counter)
+    let out_for_size = out_dir.clone();
+    let extracted = tokio::task::spawn_blocking(move || dir_size(&out_for_size))
+        .await
+        .map_err(|e| e.to_string())?;
+    if extracted > MAX_EXTRACT_BYTES {
+        return Err("Extracted content exceeds the 10 GB safety limit; nothing was uploaded.".to_string());
+    }
+
+    // 3. Avoid nested <stem>/<stem> if the archive already had a single root folder
+    let mut upload_src = out_dir.clone();
+    if let Ok(rd) = std::fs::read_dir(&out_dir) {
+        let entries: Vec<_> = rd.flatten().collect();
+        if entries.len() == 1 && entries[0].path().is_dir() {
+            upload_src = entries[0].path();
+        }
+    }
+
+    let target_remote = format!("{}/{}", dest_remote_dir.trim_end_matches('/'), stem);
+    let mut up_cmd = tokio_command(&rclone);
+    if let Some(ref cfg) = cfg_opt {
+        up_cmd.args(["--config", cfg]);
+    }
+    up_cmd.args(["copy", &upload_src.to_string_lossy(), &target_remote]);
+    let up_out = up_cmd
+        .output()
+        .await
+        .map_err(|e| format!("rclone upload failed: {}", e))?;
+    if !up_out.status.success() {
+        return Err(format!(
+            "Failed uploading extracted files: {}",
+            String::from_utf8_lossy(&up_out.stderr)
+        ));
+    }
+    Ok(target_remote)
 }
 
 #[cfg(test)]

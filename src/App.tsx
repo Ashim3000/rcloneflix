@@ -101,6 +101,30 @@ export default function App() {
       initCloudTransferPoller();
       initTvSubscriptionPoller();
       setSecretsReady(true);
+
+      // Opt-in Linux FUSE automount for usenet-drive:
+      if (
+        typeof window !== "undefined" &&
+        !(window as any).AndroidBridge &&
+        localStorage.getItem("rcloneflix_usenet_automount") === "true" &&
+        navigator.platform?.toLowerCase().includes("linux")
+      ) {
+        (async () => {
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            const st = await invoke<{ port_8553_active?: boolean }>("usenet_get_status");
+            if (!st?.port_8553_active) return;
+            const mounted = await invoke<Array<{ name: string }>>("list_mounted_remotes");
+            if (mounted.some((m) => m.name.toLowerCase() === "usenet-drive")) return;
+            const cfgPath = useAppStore.getState().rcloneConfigPath || "";
+            await invoke("usenet_mount_remote", { configPath: cfgPath });
+            await invoke("mount_remote", { configPath: cfgPath, remoteName: "usenet-drive" });
+          } catch (err: any) {
+            const { useToastStore } = await import("./store/toastStore");
+            useToastStore.getState().addToast(`usenet-drive automount skipped: ${err?.message || err}`, "info");
+          }
+        })();
+      }
     })();
     return () => stops.forEach((fn) => fn());
   }, []);

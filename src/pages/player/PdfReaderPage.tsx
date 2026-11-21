@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { MediaItem } from "../../store/appStore";
 import { useAppStore } from "../../store/appStore";
 import { getDownloadedFilePath } from "../../lib/downloadManager";
+import { httpFetch } from "../../lib/httpFetch";
 import * as pdfjsLib from "pdfjs-dist";
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 
@@ -41,17 +42,30 @@ export function PdfReaderPage() {
 
     (async () => {
       try {
-        let localPath = await getDownloadedFilePath(item);
-        if (!localPath) {
-          localPath = await invoke<string>("download_book_to_temp", {
-            configPath: rcloneConfigPath,
-            remotePath: item.remotePath,
-            sessionId: sessionId.current,
-          });
+        const catboxVer = item.versions?.find(
+          (v) =>
+            (v.sourceType === ("catbox" as any) || v.remoteName === "catbox") &&
+            v.shareUrl?.startsWith("https://files.catbox.moe/")
+        );
+        let buffer: ArrayBuffer | null = null;
+        if (catboxVer?.shareUrl) {
+          const resp = await httpFetch(catboxVer.shareUrl);
+          if (resp.ok) {
+            buffer = await resp.arrayBuffer();
+          }
+        }
+        if (!buffer) {
+          let localPath = await getDownloadedFilePath(item);
+          if (!localPath) {
+            localPath = await invoke<string>("download_book_to_temp", {
+              configPath: rcloneConfigPath,
+              remotePath: item.remotePath,
+              sessionId: sessionId.current,
+            });
+          }
+          buffer = await invoke<ArrayBuffer>("read_binary_file", { filePath: localPath });
         }
         setDownloading(false);
-
-        const buffer = await invoke<ArrayBuffer>("read_binary_file", { filePath: localPath });
         const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
         pdfRef.current = pdf;
         setTotalPages(pdf.numPages);

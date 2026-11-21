@@ -222,3 +222,14 @@ pub async fn load_rclone_settings(app: AppHandle) -> Result<RcloneSettings, Stri
     Ok(get_rclone_settings_sync(&app))
 }
 
+/// Persists the rclone config text in the app store (used for Drive backups) WITHOUT writing any file.
+pub fn set_rclone_config_content_in_store(app: &AppHandle, content: &str) -> Result<(), String> {
+    let store = app
+        .store(STORE_PATH)
+        .map_err(|e| format!("Failed to open store: {}", e))?;
+    store.set("rclone_config_content", serde_json::json!(content));
+    store
+        .save()
+        .map_err(|e| format!("Failed to save store: {}", e))
+}
+

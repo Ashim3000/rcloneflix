@@ -9,6 +9,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { useAppStore } from "../../store/appStore";
 import { scanAllLibraries } from "../../lib/scanner";
 import { AddStreamBookmarkModal } from "../library/AddStreamBookmarkModal";
+import { ProviderSearchModal } from "../discovery/ProviderSearchModal";
 import { isTvEnvironment } from "../../lib/tvNavigation";
 
 const NAV_ITEMS = [
@@ -42,14 +43,28 @@ export function Sidebar({
 }: SidebarProps) {
   const {
     libraries, remotes, adultSettings, scanState, syncState, resetConfig, setMusicSkinMode,
+    easynewsConfig, stremioAddons, debridConfig,
   } = useAppStore();
   const navigate = useNavigate();
 
   const [version, setVersion] = useState("");
   const [showAddBookmarkModal, setShowAddBookmarkModal] = useState(false);
+  const [showProviderSearch, setShowProviderSearch] = useState(false);
+  const [usenetConfigured, setUsenetConfigured] = useState(false);
+
   useEffect(() => {
     getVersion().then(setVersion).catch(() => {});
+    import("@tauri-apps/api/core").then(({ invoke }) =>
+      invoke<{ configured?: boolean }>("usenet_get_status")
+        .then((st) => setUsenetConfigured(Boolean(st?.configured)))
+        .catch(() => {})
+    );
   }, []);
+
+  const hasEasynews = Boolean(easynewsConfig?.enabled && easynewsConfig?.username && easynewsConfig?.password);
+  const hasDebridKey = Boolean(debridConfig?.realDebridApiKey || debridConfig?.premiumizeApiKey || debridConfig?.offcloudApiKey);
+  const hasStremio = Boolean((stremioAddons?.length ?? 0) > 0 && hasDebridKey);
+  const hasAnySearchProvider = hasEasynews || hasStremio || usenetConfigured;
 
   const configuredTypes = new Set(libraries.map((l) => l.type));
   const isScanning = scanState.status === "scanning";
@@ -221,6 +236,22 @@ export function Sidebar({
             <span className={collapsed ? "md:hidden" : ""}>Directplay and Streaming</span>
           </NavLink>
 
+          {hasAnySearchProvider && (
+            <button
+              onClick={() => {
+                onCloseMobile?.();
+                setShowProviderSearch(true);
+              }}
+              title="Search InfiniDysk / Easynews / Stremio & Subscribe"
+              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg font-body text-xs font-semibold text-subtle hover:text-accent hover:bg-accent/10 border border-white/10 hover:border-accent/30 transition-all mb-1 cursor-pointer ${
+                collapsed ? "md:justify-center md:px-0" : ""
+              }`}
+            >
+              <Search size={16} className="text-accent flex-shrink-0" />
+              <span className={collapsed ? "md:hidden" : ""}>Search &amp; Subscribe</span>
+            </button>
+          )}
+
           <button
             onClick={() => {
               onCloseMobile?.();
@@ -290,6 +321,10 @@ export function Sidebar({
         <AddStreamBookmarkModal
           isOpen={showAddBookmarkModal}
           onClose={() => setShowAddBookmarkModal(false)}
+        />
+        <ProviderSearchModal
+          isOpen={showProviderSearch}
+          onClose={() => setShowProviderSearch(false)}
         />
       </aside>
     </>

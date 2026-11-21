@@ -49,18 +49,20 @@ const davStreamUrl = (p: { name: string; virtual_path?: string | null }): string
     .join("/")}`;
 
 /** Derive the InfiniDysk category folder for a release so it mounts into the
- *  NZBDav-style hierarchy (/TV Shows/<Show>/Season N, /Movies, …). */
+ *  NZBDav-style hierarchy (/TV Shows/<Show>/Season N, /Movies, /Uncategorized, …). */
 function deriveVirtualDir(title: string, libraryType?: string | null): string {
   const clean = (s: string) =>
     s.replace(/[._]+/g, " ").replace(/[\\/:]/g, "-").replace(/\s+/g, " ").trim();
   const m = title.match(/^(.+?)[. _-]+S(\d{1,2})\s*[. _-]*E\d{1,3}/i);
   if (m) return `TV Shows/${clean(m[1])}/Season ${parseInt(m[2], 10)}`;
   if (libraryType === "tv") return `TV Shows/${clean(title)}`;
+  if (libraryType === "movies") return "Movies";
   if (libraryType === "music") return "Music";
+  if (libraryType === "music_videos") return "Music Videos";
   if (libraryType === "audiobooks") return "Audiobooks";
   if (libraryType === "adult") return "Adult";
   if (libraryType === "comics" || libraryType === "books") return "Books";
-  return "Movies";
+  return "Uncategorized";
 }
 
 export function InfiniDyskSearchModal({
@@ -85,6 +87,9 @@ export function InfiniDyskSearchModal({
   const [transferTarget, setTransferTarget] = useState<{ url: string; title: string } | null>(null);
   const [transcodeTarget, setTranscodeTarget] = useState<{ url: string; title: string } | null>(null);
   const [activeMenuUrl, setActiveMenuUrl] = useState<string | null>(null);
+  const [categoryOverride, setCategoryOverride] = useState<string>(item?.libraryType || "uncategorized");
+
+  const resolvedCategoryType = item?.libraryType || (categoryOverride === "uncategorized" ? null : categoryOverride);
 
   const toggleNzbFiles = async (nzb: UsenetSearchResult) => {
     if (expandedNzb === nzb.nzb_url) {
@@ -99,7 +104,7 @@ export function InfiniDyskSearchModal({
     try {
       const playables = await invoke<NzbPlayable[]>(
         "parse_nzb_media_files",
-        { nzbUrl: nzb.nzb_url, nzbXml: null, password: null, virtualDir: deriveVirtualDir(nzb.title, item?.libraryType) }
+        { nzbUrl: nzb.nzb_url, nzbXml: null, password: null, virtualDir: deriveVirtualDir(nzb.title, resolvedCategoryType) }
       );
       setNzbFilesMap((prev) => ({ ...prev, [nzb.nzb_url]: playables || [] }));
     } catch (err: any) {
@@ -163,7 +168,7 @@ export function InfiniDyskSearchModal({
           nzbUrl: nzb.nzb_url,
           nzbXml: null,
           password: null,
-          virtualDir: deriveVirtualDir(nzb.title, item?.libraryType),
+          virtualDir: deriveVirtualDir(nzb.title, resolvedCategoryType),
         }
       );
 
@@ -209,7 +214,7 @@ export function InfiniDyskSearchModal({
           nzbUrl: nzb.nzb_url,
           nzbXml: null,
           password: null,
-          virtualDir: deriveVirtualDir(nzb.title, item?.libraryType),
+          virtualDir: deriveVirtualDir(nzb.title, resolvedCategoryType),
         }
       );
 
@@ -283,6 +288,23 @@ export function InfiniDyskSearchModal({
                 className="w-full bg-surface border border-border rounded-xl pl-10 pr-4 py-2 text-sm text-text placeholder:text-subtle focus:outline-none focus:border-cyan-400 transition-colors"
               />
             </div>
+            {!item?.libraryType && (
+              <select
+                value={categoryOverride}
+                onChange={(e) => setCategoryOverride(e.target.value)}
+                title="Target InfiniDysk folder category"
+                className="bg-surface border border-border rounded-xl px-3 py-2 text-xs text-text focus:outline-none focus:border-cyan-400"
+              >
+                <option value="uncategorized">Uncategorized</option>
+                <option value="movies">Movies</option>
+                <option value="tv">TV Shows</option>
+                <option value="music">Music</option>
+                <option value="music_videos">Music Videos</option>
+                <option value="adult">Adult</option>
+                <option value="books">Books</option>
+                <option value="audiobooks">Audiobooks</option>
+              </select>
+            )}
             <button
               onClick={() => handleSearch()}
               disabled={loading || !query.trim()}

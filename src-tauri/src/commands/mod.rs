@@ -19,3 +19,5 @@ pub mod archive;
 pub mod alist;
 pub mod telegram;
 pub mod usenet_dav;
+pub mod catbox;
+pub mod fingerprint;

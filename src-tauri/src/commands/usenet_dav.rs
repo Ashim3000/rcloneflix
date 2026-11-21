@@ -827,6 +827,13 @@ pub async fn usenet_get_status() -> Result<UsenetStatus, String> {
 }
 
 #[tauri::command]
+pub async fn usenet_get_config() -> Result<Option<UsenetServerConfig>, String> {
+    let engine = get_usenet_engine();
+    let cfg = engine.config.read().await;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
 pub async fn usenet_save_config(config: UsenetServerConfig) -> Result<(), String> {
     let engine = get_usenet_engine();
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;

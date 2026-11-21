@@ -70,7 +70,13 @@ export type AdminPassPayload = {
     telegramConfig?: any;
     keepAliveConfig?: any;
     udropConfig?: any;
+    usenetServerConfig?: any;
+    omgUser?: string;
+    omgKey?: string;
+    catboxConfig?: any;
+    stashBoxProviders?: any[];
   };
+  stremioAddons?: any[];
   mediaItems?: Record<string, MediaItem>;
   watchProgress?: Record<string, any>;
   favorites?: Record<string, number>;
@@ -558,6 +564,14 @@ export async function exportAccessPass(options: ExportPassOptions): Promise<{
   // ── ADMIN PASS EXPORT (Full personal identity clone for TV & secondary devices) ──
   if (passType === "admin") {
     const passId = `admin_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    let usenetServerConfig: any = null;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      usenetServerConfig = await invoke("usenet_get_config");
+    } catch {}
+    const omgUser = typeof window !== "undefined" ? localStorage.getItem("rcloneflix_omg_user") || undefined : undefined;
+    const omgKey = typeof window !== "undefined" ? localStorage.getItem("rcloneflix_omg_key") || undefined : undefined;
+
     const adminPayload: AdminPassPayload = {
       fullRcloneConfig: configContent,
       libraries: s.libraries,
@@ -580,7 +594,13 @@ export async function exportAccessPass(options: ExportPassOptions): Promise<{
         telegramConfig: s.telegramConfig,
         keepAliveConfig: s.keepAliveConfig,
         udropConfig: loadUdropConfig(),
+        usenetServerConfig,
+        omgUser,
+        omgKey,
+        catboxConfig: (s as any).catboxConfig,
+        stashBoxProviders: (s as any).stashBoxProviders,
       },
+      stremioAddons: s.stremioAddons,
       mediaItems: s.mediaItems,
       watchProgress: s.watchProgress,
       favorites: s.favorites,
@@ -901,30 +921,47 @@ async function importAdminPass(
   onProgress?.("Restoring cloud remotes and configurations...");
   const configContent = admin.fullRcloneConfig || payload.scopedRcloneConfig;
   s.setRcloneConfigContent(configContent);
+  const isAndroid = typeof window !== "undefined" && !!(window as any).AndroidBridge;
   try {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("save_rclone_config_content", { content: configContent });
-  } catch {}
-
-  // If a local rclone.conf exists or can be written, write it
-  if (s.rcloneConfigPath) {
-    try {
-      const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-      await writeTextFile(s.rcloneConfigPath, configContent);
-    } catch (e) {
-      log.warn("access-pass", `Could not write rclone.conf to disk: ${e}`);
+    if (isAndroid) {
+      // No desktop rclone.conf to protect on Android; keep the existing persistence path.
+      await invoke("save_rclone_config_content", { content: configContent });
+      s.setRcloneConfigPath("android://rclone.conf");
+    } else {
+      // IMPORTANT: do NOT call save_rclone_config_content first — it overwrites the on-disk file
+      // and would destroy local remotes before rclone_apply_admin_config can back up / merge.
+      const applied = await invoke<{
+        config_path: string;
+        remotes: Array<{ name: string; remote_type: string }>;
+        merged_content: string;
+      }>("rclone_apply_admin_config", {
+        configPath: s.rcloneConfigPath || "",
+        adminContent: configContent,
+      });
+      if (applied?.config_path) {
+        s.setRcloneConfigPath(applied.config_path);
+      }
+      if (applied?.merged_content) {
+        s.setRcloneConfigContent(applied.merged_content);
+      }
+      if (applied?.remotes?.length) {
+        s.setRemotes(applied.remotes.map((r) => ({ name: r.name, type: r.remote_type })));
+      }
     }
-  } else if (typeof window !== "undefined" && (window as any).AndroidBridge) {
-    s.setRcloneConfigPath("android://rclone.conf");
+  } catch (e) {
+    log.warn("access-pass", `Backend rclone_apply_admin_config fallback: ${e}`);
+    if (isAndroid) {
+      s.setRcloneConfigPath("android://rclone.conf");
+    }
+    const sections = parseRcloneIni(configContent);
+    s.setRemotes(
+      Array.from(sections.entries()).map(([name, sec]) => ({
+        name,
+        type: sec.get("type") || "drive",
+      }))
+    );
   }
-
-  // Parse remotes from config and update store
-  const sections = parseRcloneIni(configContent);
-  const remotesList = Array.from(sections.entries()).map(([name, sec]) => ({
-    name,
-    type: sec.get("type") || "drive",
-  }));
-  s.setRemotes(remotesList);
 
   // 2. Restore all libraries & settings
   onProgress?.("Restoring libraries and credentials...");
@@ -959,6 +996,29 @@ async function importAdminPass(
 
     if (admin.secrets?.udropConfig) {
       saveUdropConfig(admin.secrets.udropConfig);
+    }
+    if (Array.isArray(admin.stremioAddons) && admin.stremioAddons.length > 0) {
+      useAppStore.setState({ stremioAddons: admin.stremioAddons });
+    }
+    if (admin.secrets?.omgUser) {
+      localStorage.setItem("rcloneflix_omg_user", admin.secrets.omgUser);
+    }
+    if (admin.secrets?.omgKey) {
+      localStorage.setItem("rcloneflix_omg_key", admin.secrets.omgKey);
+    }
+    if (admin.secrets?.usenetServerConfig?.host) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("usenet_save_config", { config: admin.secrets.usenetServerConfig });
+      } catch (e) {
+        log.warn("access-pass", `Failed to restore Usenet NNTP config: ${e}`);
+      }
+    }
+    if (admin.secrets?.catboxConfig) {
+      useAppStore.setState({ catboxConfig: admin.secrets.catboxConfig } as any);
+    }
+    if (Array.isArray(admin.secrets?.stashBoxProviders)) {
+      useAppStore.setState({ stashBoxProviders: admin.secrets.stashBoxProviders } as any);
     }
 
     if (admin.siteBookmarks && Array.isArray(admin.siteBookmarks) && admin.siteBookmarks.length > 0) {

@@ -7,7 +7,7 @@ import {
   ExternalLink, CheckCircle2, Loader2, RefreshCw, FolderOpen,
   CloudDownload, AlertCircle, Zap, BookOpen, ArrowRightLeft,
   Pencil, Trash2, Plus, Info, Copy, Check, Eye, Play, X, Wrench, Sparkles,
-  ArrowUpDown, ArrowUp, ArrowDown, Globe, CloudUpload, Upload, FolderUp, Share2
+  ArrowUpDown, ArrowUp, ArrowDown, Globe, CloudUpload, Upload, FolderUp, Share2, ArchiveRestore
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -722,6 +722,87 @@ export function CloudExplorerPage() {
     });
   }, [items, searchQuery, sortField, sortDirection]);
 
+  const [extractingPath, setExtractingPath] = useState<string | null>(null);
+  const [mountedRemotes, setMountedRemotes] = useState<Array<{ name: string; mount_point: string; managed: boolean }>>([]);
+  const [mountingRemote, setMountingRemote] = useState(false);
+
+  const refreshMountedRemotes = useCallback(async () => {
+    try {
+      const list = await invoke<Array<{ name: string; mount_point: string; managed: boolean }>>("list_mounted_remotes");
+      setMountedRemotes(Array.isArray(list) ? list : []);
+    } catch {
+      setMountedRemotes([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshMountedRemotes();
+    const onFocus = () => void refreshMountedRemotes();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshMountedRemotes]);
+
+  const activeMount = useMemo(() => {
+    if (!selectedRemote || isLocalRemote) return undefined;
+    const clean = selectedRemote.replace(/:$/, "").toLowerCase();
+    return mountedRemotes.find((m) => m.name.toLowerCase() === clean);
+  }, [mountedRemotes, selectedRemote, isLocalRemote]);
+
+  const handleToggleFuseMount = async () => {
+    if (!selectedRemote || isLocalRemote) return;
+    if (activeMount && !activeMount.managed) return;
+    setMountingRemote(true);
+    try {
+      if (activeMount?.managed) {
+        await invoke("unmount_remote", { remoteName: selectedRemote });
+        useToastStore.getState().addToast(`Unmounted ${selectedRemote}`, "success");
+      } else {
+        const mp = await invoke<string>("mount_remote", {
+          configPath: rcloneConfigPath || "",
+          remoteName: selectedRemote,
+        });
+        useToastStore.getState().addToast(`Mounted ${selectedRemote} at ${mp}`, "success");
+      }
+      await refreshMountedRemotes();
+    } catch (err: any) {
+      useToastStore.getState().addToast(`${err?.message || err}`, "error");
+    } finally {
+      setMountingRemote(false);
+    }
+  };
+
+  const handleExtractHere = async (item: RcloneListItem) => {
+    if (!selectedRemote || selectedRemote.startsWith("shared_")) {
+      useToastStore.getState().addToast("Guest pass remotes are read-only.", "error");
+      return;
+    }
+    const remotePrefix = isLocalRemote
+      ? selectedRemote.replace(/^local:/, "").replace(/\/$/, "")
+      : `${selectedRemote}:`;
+    const itemRel = (item.path || item.name).replace(/^\/+/, "");
+    const sourceRemotePath = isLocalRemote
+      ? `${remotePrefix}/${itemRel}`
+      : `${selectedRemote}:${itemRel}`;
+    const destRemoteDir = isLocalRemote
+      ? currentPath
+      : `${selectedRemote}:${currentPath}`;
+    setExtractingPath(sourceRemotePath);
+    useToastStore.getState().addToast(`Extracting ${item.name}...`, "info");
+    try {
+      const target = await invoke<string>("extract_remote_archive_to_remote", {
+        configPath: rcloneConfigPath || "",
+        sourceRemotePath,
+        destRemoteDir,
+      });
+      useToastStore.getState().addToast(`Extracted to ${target}`, "success");
+      fetchDirectory();
+    } catch (err: any) {
+      useToastStore.getState().addToast(`Extraction failed: ${err?.message || err}`, "error");
+    } finally {
+      setExtractingPath(null);
+    }
+  };
+
   const handleDownloadFile = async (item: RcloneListItem) => {
     const downloadId = `dl-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const remoteFilePath = getItemFullPath(item.name);
@@ -1223,6 +1304,32 @@ export function CloudExplorerPage() {
           >
             <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
           </button>
+
+          {selectedRemote && !isLocalRemote && (
+            activeMount && !activeMount.managed ? (
+              <span
+                title={`Mounted externally at ${activeMount.mount_point}`}
+                className="px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-mono flex items-center gap-1.5"
+              >
+                <HardDrive size={13} />
+                <span>Mounted (external)</span>
+              </span>
+            ) : (
+              <button
+                onClick={handleToggleFuseMount}
+                disabled={mountingRemote}
+                title={activeMount?.managed ? `Unmount ${activeMount.mount_point}` : `Mount ${selectedRemote}: via FUSE to ~/RcloneFlixMounts/${selectedRemote}`}
+                className={`px-3 py-1.5 rounded-xl border text-xs font-mono flex items-center gap-1.5 transition-all disabled:opacity-50 ${
+                  activeMount?.managed
+                    ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-300 hover:bg-rose-500/15 hover:border-rose-500/30 hover:text-rose-300"
+                    : "bg-panel border-border text-subtle hover:text-bright hover:bg-surface"
+                }`}
+              >
+                {mountingRemote ? <Loader2 size={13} className="animate-spin" /> : <HardDrive size={13} />}
+                <span>{activeMount?.managed ? "Mounted (Unmount)" : "Mount FUSE"}</span>
+              </button>
+            )
+          )}
 
           <input
             ref={fileUploadRef}
@@ -1863,6 +1970,20 @@ export function CloudExplorerPage() {
                             >
                               <Zap size={13} />
                               <span className="hidden sm:inline">Transcode</span>
+                            </button>
+                          )}
+                          {!item.is_dir && /\.(zip|rar|7z|tar|tar\.gz|tgz)$/i.test(item.name) && (
+                            <button
+                              onClick={() => handleExtractHere(item)}
+                              disabled={Boolean(extractingPath)}
+                              className="p-1.5 rounded-lg bg-panel hover:bg-accent/20 text-subtle hover:text-accent border border-border/50 hover:border-accent/40 transition-all disabled:opacity-50"
+                              title={`Extract Here: ${item.name}`}
+                            >
+                              {extractingPath && extractingPath.endsWith(item.name) ? (
+                                <Loader2 size={13} className="animate-spin text-accent" />
+                              ) : (
+                                <ArchiveRestore size={13} />
+                              )}
                             </button>
                           )}
                           <button

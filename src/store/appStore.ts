@@ -106,6 +106,10 @@ export type TvSubscription = {
   destinationRemotePath: string; // e.g. "gdrive:TV Shows/Severance"
   lastCheckedAt?: number;
   lastGrabbedEpisode?: string;   // e.g. "S02E04"
+  /** "tv" (default, SxxExx tracking) or "dated_scene" (site + release-date tracking). */
+  subscriptionKind?: "tv" | "dated_scene";
+  /** dated_scene only: newest release date already grabbed, "YYYY-MM-DD". */
+  lastGrabbedDate?: string;
   status: "active" | "paused";
 };
 
@@ -158,6 +162,7 @@ export type GhaAccount = {
   workflowFile?: string;
   branch?: string;
   enabled?: boolean;
+  allowPublicRepo?: boolean;
   isExhausted?: boolean;
   exhaustedAt?: number;
 };
@@ -218,6 +223,12 @@ export type MediaItem = {
   subtitle?: string;
   itemCount?: number;
   groupType?: "show" | "album" | "book" | "single";
+  // User-defined tags & Stash-style adult metadata
+  userTags?: string[];
+  studio?: string;
+  performers?: string[];
+  oshash?: string;
+  phash?: string;
   // Technical media specs
   sizeBytes?: number;
   container?: string;
@@ -366,6 +377,9 @@ export type AppConfig = {
   rcloneSettings: RcloneSettings;
   streamtapeConfig: StreamtapeConfig;
   doodstreamConfig: DoodstreamConfig;
+  catboxConfig?: { enabled: boolean; userhash?: string };
+  stashBoxProviders?: Array<{ id: string; name: string; endpoint: string; apiKey: string; enabled: boolean }>;
+  experimentalPhashEnabled?: boolean;
   keepAliveConfig: KeepAliveConfig;
   telegramConfig: TelegramConfig;
   dropmbConfig: DropmbConfig;
@@ -398,6 +412,7 @@ export type GhaConfig = {
   owner: string;
   repo: string;
   workflowFile?: string;
+  allowPublicRepo?: boolean;
 };
 
 export type RcloneSettings = {
@@ -666,6 +681,9 @@ type AppStore = AppConfig & {
   setRcloneSettings: (updates: Partial<RcloneSettings>) => void;
   setStreamtapeConfig: (updates: Partial<StreamtapeConfig>) => void;
   setDoodstreamConfig: (updates: Partial<DoodstreamConfig>) => void;
+  setCatboxConfig: (updates: Partial<{ enabled: boolean; userhash?: string }>) => void;
+  setStashBoxProviders: (providers: Array<{ id: string; name: string; endpoint: string; apiKey: string; enabled: boolean }>) => void;
+  setExperimentalPhashEnabled: (enabled: boolean) => void;
   setKeepAliveConfig: (updates: Partial<KeepAliveConfig>) => void;
   setTelegramConfig: (updates: Partial<TelegramConfig>) => void;
   setDropmbConfig: (updates: Partial<DropmbConfig>) => void;
@@ -695,6 +713,8 @@ type AppStore = AppConfig & {
   removeMediaItem: (id: string) => void;
   bulkUpsertMediaItems: (items: MediaItem[]) => void;
   updateItemMetadata: (id: string, updates: Partial<MediaItem>) => void;
+  setItemUserTags: (itemId: string, tags: string[]) => void;
+  bulkAddUserTag: (itemIds: string[], tag: string) => void;
   clearLibraryItems: (libraryId: string) => void;
 
   // Watch Progress
@@ -1274,6 +1294,10 @@ export const useAppStore = create<AppStore>()(
         set((s) => ({ streamtapeConfig: { ...(s.streamtapeConfig || defaultStreamtapeConfig), ...updates } })),
       setDoodstreamConfig: (updates) =>
         set((s) => ({ doodstreamConfig: { ...(s.doodstreamConfig || defaultDoodstreamConfig), ...updates } })),
+      setCatboxConfig: (updates) =>
+        set((s) => ({ catboxConfig: { enabled: false, ...(s.catboxConfig || {}), ...updates } })),
+      setStashBoxProviders: (providers) => set({ stashBoxProviders: providers }),
+      setExperimentalPhashEnabled: (enabled) => set({ experimentalPhashEnabled: enabled }),
       setKeepAliveConfig: (updates) =>
         set((s) => ({ keepAliveConfig: { ...(s.keepAliveConfig || defaultKeepAliveConfig), ...updates } })),
       setTelegramConfig: (updates) =>
@@ -1449,6 +1473,39 @@ export const useAppStore = create<AppStore>()(
         }),
       updateItemMetadata: (id, updates) =>
         set((s) => ({ mediaItems: { ...s.mediaItems, [id]: { ...s.mediaItems[id], ...updates } } })),
+      setItemUserTags: (itemId, tags) => {
+        const clean = Array.from(new Set(tags.map((t) => t.trim()).filter(Boolean)));
+        let updatedItem: MediaItem | null = null;
+        set((s) => {
+          const cur = s.mediaItems[itemId];
+          if (!cur) return s;
+          updatedItem = { ...cur, userTags: clean };
+          return { mediaItems: { ...s.mediaItems, [itemId]: updatedItem } };
+        });
+        if (updatedItem) {
+          import("../lib/libraryDb").then(({ persistItems }) => persistItems([updatedItem!])).catch(() => {});
+        }
+      },
+      bulkAddUserTag: (itemIds, tag) => {
+        const cleanTag = tag.trim();
+        if (!cleanTag || itemIds.length === 0) return;
+        const updatedList: MediaItem[] = [];
+        set((s) => {
+          const next = { ...s.mediaItems };
+          for (const id of itemIds) {
+            const cur = next[id];
+            if (!cur) continue;
+            const merged = Array.from(new Set([...(cur.userTags || []), cleanTag]));
+            const upd = { ...cur, userTags: merged };
+            next[id] = upd;
+            updatedList.push(upd);
+          }
+          return { mediaItems: next };
+        });
+        if (updatedList.length > 0) {
+          import("../lib/libraryDb").then(({ persistItems }) => persistItems(updatedList)).catch(() => {});
+        }
+      },
       clearLibraryItems: (libraryId) =>
         set((s) => {
           const n: Record<string, MediaItem> = {};
@@ -1958,6 +2015,11 @@ export function mergeMediaItems(preferred: MediaItem, secondary: MediaItem): Med
     album: preferred.album || secondary.album,
     trackNumber: preferred.trackNumber || secondary.trackNumber,
     author: preferred.author || secondary.author,
+    userTags: Array.from(new Set([...(preferred.userTags || []), ...(secondary.userTags || [])])),
+    studio: preferred.studio || secondary.studio,
+    performers: (preferred.performers && preferred.performers.length > 0) ? preferred.performers : secondary.performers,
+    oshash: preferred.oshash || secondary.oshash,
+    phash: preferred.phash || secondary.phash,
   };
 }
 

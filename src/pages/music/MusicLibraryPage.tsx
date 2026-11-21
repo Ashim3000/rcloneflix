@@ -1,5 +1,7 @@
 import { useMemo, useState, useRef, useEffect } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useSearchParams } from "react-router-dom";
+import { TagFilterStrip } from "../../components/common/TagFilterStrip";
+import { UserTagsEditor } from "../../components/common/UserTagsEditor";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { motion } from "framer-motion";
 import { ChevronLeft, Search, Music, Disc3, Clock, RefreshCw, Play, Download, Sparkles, SortAsc, Cloud, Check, Loader2, AlertCircle, BookOpen, X } from "lucide-react";
@@ -108,6 +110,11 @@ export function MusicLibraryPage() {
 
   const filteredArtists = useMemo(() => {
     let list = artists;
+    if (activeTag) {
+      list = list.filter((a) =>
+        Object.values(a.albums).some((alb) => alb.tracks.some((t) => t.userTags?.includes(activeTag)))
+      );
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter((a) => a.name.toLowerCase().includes(q));
@@ -123,9 +130,19 @@ export function MusicLibraryPage() {
     });
   }, [artists, search, sort, artistAddedAtMap]);
 
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTag = searchParams.get("tag");
+  const musicItems = useMemo(
+    () => Object.values(mediaItems).filter((i) => i.libraryType === "music"),
+    [mediaItems]
+  );
+
   const filteredAlbums = useMemo(() => {
     if (!selectedArtist) return [];
     let albums = Object.values(selectedArtist.albums);
+    if (activeTag) {
+      albums = albums.filter((alb) => alb.tracks.some((t) => t.userTags?.includes(activeTag)));
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       albums = albums.filter((a) => a.name.toLowerCase().includes(q));
@@ -395,6 +412,14 @@ export function MusicLibraryPage() {
               )}
             </div>
 
+            {view === "artists" && (
+              <TagFilterStrip
+                items={musicItems}
+                activeTag={activeTag}
+                onSelectTag={(t) => (t ? setSearchParams({ tag: t }) : setSearchParams({}))}
+              />
+            )}
+
             {/* Artists grid */}
             {view === "artists" && (
               filteredArtists.length === 0 ? (
@@ -595,6 +620,14 @@ export function MusicLibraryPage() {
                         showLabel
                         label="Add to Playlist"
                       />
+                      <div className="w-full pt-2">
+                        <UserTagsEditor
+                          itemIds={selectedAlbum.tracks.map((t) => t.id)}
+                          tags={Array.from(new Set(selectedAlbum.tracks.flatMap((t) => t.userTags || [])))}
+                          libraryType="music"
+                          libraryRoute="/music"
+                        />
+                      </div>
                       {selectedAlbum.tracks[0] && (
                         <button
                           onClick={() => {

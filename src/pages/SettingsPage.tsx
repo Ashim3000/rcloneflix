@@ -43,6 +43,8 @@ import { backupToRemote, restoreFromRemote, BACKUP_FILE } from "../lib/rcloneSyn
 import { artworkCacheStats, clearArtworkCache } from "../lib/artwork";
 import { RemoteBrowser } from "../components/common/RemoteBrowser";
 import { pickLocalFolder, vaultPhotoCacheStats, clearVaultPhotoCache, rcloneCreateCryptRemote, rcloneCreateWebdavRemote, pickRcloneConfig, parseRcloneConfig, saveRcloneSettings } from "../lib/tauri";
+import { ensureGitHubWorkerReady, DEFAULT_GHA_WORKER_REPO } from "../lib/githubWorkerProvisioner";
+import { testStashBoxConnection, type StashBoxProvider } from "../lib/stashBox";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { scanLibrary } from "../lib/scanner";
 import { CreateAccessPassModal } from "../components/accessPass/CreateAccessPassModal";
@@ -101,6 +103,10 @@ export function SettingsPage() {
   const {
     tmdbApiKey,
     thePornDbApiKey,
+    stashBoxProviders,
+    setStashBoxProviders,
+    experimentalPhashEnabled,
+    setExperimentalPhashEnabled,
     googleClientId,
     rcloneConfigPath,
     libraries,
@@ -188,6 +194,17 @@ export function SettingsPage() {
   // Form states
   const [tmdbInput, setTmdbInput] = useState(tmdbApiKey);
   const [pornDbInput, setPornDbInput] = useState(thePornDbApiKey);
+  const defaultStashProvider: StashBoxProvider = (stashBoxProviders && stashBoxProviders[0]) || {
+    id: "stashdb",
+    name: "StashDB",
+    endpoint: "https://stashdb.org/graphql",
+    apiKey: "",
+    enabled: false,
+  };
+  const [stashEndpoint, setStashEndpoint] = useState(defaultStashProvider.endpoint);
+  const [stashApiKey, setStashApiKey] = useState(defaultStashProvider.apiKey);
+  const [stashEnabled, setStashEnabled] = useState(defaultStashProvider.enabled);
+  const [testingStash, setTestingStash] = useState(false);
   const [savedApiKeys, setSavedApiKeys] = useState(false);
 
   // Kaggle Transcoder states
@@ -202,8 +219,10 @@ export function SettingsPage() {
   const [ghaEnabled, setGhaEnabled] = useState(ghaConfig?.enabled ?? false);
   const [ghaTokenInput, setGhaTokenInput] = useState(ghaConfig?.token ?? "");
   const [ghaOwnerInput, setGhaOwnerInput] = useState(ghaConfig?.owner ?? "");
-  const [ghaRepoInput, setGhaRepoInput] = useState(ghaConfig?.repo ?? "");
+  const [ghaRepoInput, setGhaRepoInput] = useState(ghaConfig?.repo || DEFAULT_GHA_WORKER_REPO);
+  const [ghaAllowPublic, setGhaAllowPublic] = useState(ghaConfig?.allowPublicRepo ?? false);
   const [testingGha, setTestingGha] = useState(false);
+  const [provisioningGha, setProvisioningGha] = useState(false);
   const [ghaTestResult, setGhaTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [savedGha, setSavedGha] = useState(false);
 
@@ -224,7 +243,8 @@ export function SettingsPage() {
       setGhaEnabled(ghaConfig.enabled);
       setGhaTokenInput(ghaConfig.token);
       setGhaOwnerInput(ghaConfig.owner);
-      setGhaRepoInput(ghaConfig.repo);
+      setGhaRepoInput(ghaConfig.repo || DEFAULT_GHA_WORKER_REPO);
+      setGhaAllowPublic(ghaConfig.allowPublicRepo ?? false);
     }
   }, [ghaConfig]);
 
@@ -492,11 +512,37 @@ export function SettingsPage() {
       enabled: ghaEnabled,
       token: ghaTokenInput.trim(),
       owner: ghaOwnerInput.trim(),
-      repo: ghaRepoInput.trim(),
+      repo: ghaRepoInput.trim() || DEFAULT_GHA_WORKER_REPO,
+      allowPublicRepo: ghaAllowPublic,
     });
     setSavedGha(true);
     useToastStore.getState().addToast("Saved GitHub Actions runner configuration", "success");
     setTimeout(() => setSavedGha(false), 2000);
+  };
+
+  const handleProvisionGha = async (forceSync: boolean) => {
+    setProvisioningGha(true);
+    setGhaTestResult(null);
+    try {
+      const res = await ensureGitHubWorkerReady({
+        token: ghaTokenInput.trim(),
+        owner: ghaOwnerInput.trim() || undefined,
+        repo: ghaRepoInput.trim() || DEFAULT_GHA_WORKER_REPO,
+        workflowFile: ghaConfig?.workflowFile,
+        forceSync,
+        allowPublic: ghaAllowPublic,
+      });
+      setGhaOwnerInput(res.owner);
+      setGhaRepoInput(res.repo);
+      setGhaTestResult({ ok: true, message: res.statusMessage });
+      useToastStore.getState().addToast(res.statusMessage, "success");
+    } catch (err: any) {
+      const msg = err?.message || "Failed to provision GitHub Actions worker";
+      setGhaTestResult({ ok: false, message: msg });
+      useToastStore.getState().addToast(msg, "error");
+    } finally {
+      setProvisioningGha(false);
+    }
   };
 
   const handleTestGha = async () => {
@@ -1617,6 +1663,105 @@ export function SettingsPage() {
                 {savedApiKeys ? <Check size={16} /> : <Save size={16} />}
                 {savedApiKeys ? "Saved!" : "Save Credentials"}
               </button>
+            </div>
+
+            {/* Stash-Box Providers & Experimental Visual pHash */}
+            <div className="bg-panel border border-border rounded-xl p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Stash-Box Providers</h3>
+                  <p className="text-xs text-subtle mt-0.5">
+                    GraphQL fingerprint &amp; scene lookup (StashDB preset: https://stashdb.org/graphql).
+                  </p>
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={stashEnabled}
+                    onChange={(e) => setStashEnabled(e.target.checked)}
+                    className="rounded border-border text-accent focus:ring-0"
+                  />
+                  <span className="text-xs text-white font-semibold">Enable</span>
+                </label>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-subtle block mb-1">GraphQL Endpoint</label>
+                  <input
+                    type="text"
+                    value={stashEndpoint}
+                    onChange={(e) => setStashEndpoint(e.target.value)}
+                    placeholder="https://stashdb.org/graphql"
+                    className="input-field font-mono text-xs w-full"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-subtle block mb-1">ApiKey</label>
+                  <input
+                    type="password"
+                    value={stashApiKey}
+                    onChange={(e) => setStashApiKey(e.target.value)}
+                    placeholder="Stash-Box API Key"
+                    className="input-field font-mono text-xs w-full"
+                  />
+                </div>
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(experimentalPhashEnabled)}
+                  onChange={(e) => setExperimentalPhashEnabled(e.target.checked)}
+                  className="rounded border-border text-accent focus:ring-0"
+                />
+                <span className="text-xs text-subtle">
+                  Experimental: Enable Visual pHash (25-frame montage) in Fingerprint Modal
+                </span>
+              </label>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStashBoxProviders([
+                      {
+                        id: "stashdb",
+                        name: "StashDB",
+                        endpoint: stashEndpoint.trim() || "https://stashdb.org/graphql",
+                        apiKey: stashApiKey.trim(),
+                        enabled: stashEnabled,
+                      },
+                    ]);
+                    useToastStore.getState().addToast("Saved Stash-Box provider settings", "success");
+                  }}
+                  className="btn-primary text-xs py-2 px-4 flex items-center gap-1.5"
+                >
+                  <Save size={14} /> Save Stash-Box
+                </button>
+                <button
+                  type="button"
+                  disabled={testingStash || !stashEndpoint.trim()}
+                  onClick={async () => {
+                    setTestingStash(true);
+                    try {
+                      const r = await testStashBoxConnection({
+                        id: "stashdb",
+                        name: "StashDB",
+                        endpoint: stashEndpoint.trim(),
+                        apiKey: stashApiKey.trim(),
+                        enabled: stashEnabled,
+                      });
+                      useToastStore.getState().addToast(r.message, r.ok ? "success" : "error");
+                    } catch (e: any) {
+                      useToastStore.getState().addToast(`Connection failed: ${e?.message || e}`, "error");
+                    } finally {
+                      setTestingStash(false);
+                    }
+                  }}
+                  className="btn-secondary text-xs py-2 px-4 flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {testingStash ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                  Test Connection
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -3156,6 +3301,18 @@ export function SettingsPage() {
                     </p>
                   </div>
 
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={ghaAllowPublic}
+                      onChange={(e) => setGhaAllowPublic(e.target.checked)}
+                      className="rounded border-border text-accent focus:ring-accent bg-surface"
+                    />
+                    <span className="text-xs text-subtle">
+                      Allow public worker repo (I understand secrets will be visible)
+                    </span>
+                  </label>
+
                   {ghaTestResult && (
                     <div
                       className={`p-3 rounded-xl border flex items-start gap-2.5 text-xs font-body ${
@@ -3173,7 +3330,7 @@ export function SettingsPage() {
                     </div>
                   )}
 
-                  <div className="flex items-center gap-3 pt-1">
+                  <div className="flex flex-wrap items-center gap-3 pt-1">
                     <button
                       onClick={handleSaveGha}
                       className="btn-primary text-xs py-2 px-4 flex items-center gap-1.5"
@@ -3193,6 +3350,28 @@ export function SettingsPage() {
                         <RefreshCw size={14} />
                       )}
                       <span>{testingGha ? "Testing..." : "Test GitHub Connection"}</span>
+                    </button>
+
+                    <button
+                      onClick={() => handleProvisionGha(false)}
+                      disabled={provisioningGha || !ghaTokenInput.trim()}
+                      className="btn-secondary text-xs py-2 px-4 flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      {provisioningGha ? (
+                        <Loader2 size={14} className="animate-spin text-accent" />
+                      ) : (
+                        <CloudUpload size={14} />
+                      )}
+                      <span>Provision / Sync Worker</span>
+                    </button>
+
+                    <button
+                      onClick={() => handleProvisionGha(true)}
+                      disabled={provisioningGha || !ghaTokenInput.trim()}
+                      className="btn-secondary text-xs py-2 px-4 flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      <Zap size={14} />
+                      <span>Force Sync Workflow</span>
                     </button>
                   </div>
 
@@ -4737,6 +4916,8 @@ function StreamtapeSettingsSection() {
     setDoodstreamConfig,
     dropmbConfig,
     setDropmbConfig,
+    catboxConfig,
+    setCatboxConfig,
     keepAliveConfig,
     setKeepAliveConfig,
     libraries,
@@ -4769,6 +4950,11 @@ function StreamtapeSettingsSection() {
   const [dropmbToken, setDropmbToken] = useState(dropmbConfig?.token ?? "");
   const [authenticatingDropmb, setAuthenticatingDropmb] = useState(false);
   const [dropmbStatusMessage, setDropmbStatusMessage] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Catbox.moe Opt-In Offload State
+  const [catboxEnabled, setCatboxEnabled] = useState(catboxConfig?.enabled ?? false);
+  const [catboxUserhash, setCatboxUserhash] = useState(catboxConfig?.userhash ?? "");
+  const [catboxSaved, setCatboxSaved] = useState(false);
   const [dropmbSaved, setDropmbSaved] = useState(false);
 
   // Autonomous Keep-Alive Bot State
@@ -5326,6 +5512,62 @@ function StreamtapeSettingsSection() {
               <span>{dropmbSaved ? "Saved" : "Save DropMB Settings"}</span>
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* Card: Catbox.moe Offload (Opt-In, Public URLs) */}
+      <div className="bg-panel border border-border rounded-xl p-5 space-y-4">
+        <div className="flex items-center justify-between pb-3 border-b border-border">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-white">Catbox.moe Offload (200 MB Max)</span>
+              <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                Public Links
+              </span>
+            </div>
+            <p className="text-xs text-subtle mt-0.5">
+              Opt-in direct hotlink offload for music, books, comics, and photos (&le; 200 MB). Uploaded files get a public{" "}
+              <code className="font-mono text-bright">https://files.catbox.moe/...</code> URL accessible to anyone with the link. Only files uploaded with a{" "}
+              <code className="font-mono text-bright">userhash</code> can later be deleted.
+            </p>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={catboxEnabled}
+              onChange={(e) => setCatboxEnabled(e.target.checked)}
+              className="rounded border-border text-accent focus:ring-0"
+            />
+            <span className="text-xs text-white font-semibold">Enable</span>
+          </label>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs font-medium text-subtle block mb-1.5">
+              Catbox Userhash (Optional — required if you want to delete uploads later)
+            </label>
+            <input
+              type="password"
+              value={catboxUserhash}
+              onChange={(e) => setCatboxUserhash(e.target.value)}
+              placeholder="Optional Catbox account userhash"
+              className="input-field w-full text-xs font-mono"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setCatboxConfig({ enabled: catboxEnabled, userhash: catboxUserhash.trim() });
+              setCatboxSaved(true);
+              addToast("Saved Catbox.moe offload settings", "success");
+              setTimeout(() => setCatboxSaved(false), 2000);
+            }}
+            className="btn-accent text-xs py-2 px-4 flex items-center gap-1.5"
+          >
+            {catboxSaved ? <Check size={14} /> : <Save size={14} />}
+            <span>{catboxSaved ? "Saved" : "Save Catbox Settings"}</span>
+          </button>
         </div>
       </div>
 
@@ -6514,6 +6756,9 @@ function UsenetIndexerSettingsCard() {
   const [savingNntp, setSavingNntp] = useState(false);
   const [testingNntp, setTestingNntp] = useState(false);
   const [mountingNntp, setMountingNntp] = useState(false);
+  const [usenetAutomount, setUsenetAutomount] = useState(
+    () => typeof window !== "undefined" && localStorage.getItem("rcloneflix_usenet_automount") === "true"
+  );
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [indexersHealth, setIndexersHealth] = useState<any[]>([]);
   const [playingNzbUrl, setPlayingNzbUrl] = useState<string | null>(null);
@@ -6792,6 +7037,19 @@ function UsenetIndexerSettingsCard() {
               {mountingNntp ? <Loader2 size={13} className="animate-spin text-accent" /> : <HardDrive size={13} />}
               <span>Mount Remote (usenet-drive)</span>
             </button>
+            <label className="flex items-center gap-2 text-xs text-subtle cursor-pointer select-none ml-2">
+              <input
+                type="checkbox"
+                checked={usenetAutomount}
+                onChange={(e) => {
+                  const next = e.target.checked;
+                  setUsenetAutomount(next);
+                  localStorage.setItem("rcloneflix_usenet_automount", next ? "true" : "false");
+                }}
+                className="rounded border-border text-accent focus:ring-0"
+              />
+              <span>Auto-mount usenet-drive via FUSE on startup (Linux)</span>
+            </label>
           </div>
         </div>
       )}

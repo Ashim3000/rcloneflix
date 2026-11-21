@@ -29,31 +29,45 @@ type Props = {
     posterUrl?: string;
     libraryId: string;
     destinationRemotePath: string;
+    subscriptionKind?: "tv" | "dated_scene";
+    lastGrabbedDate?: string;
+    lastGrabbedEpisode?: string;
+    preferredSource?: TvSubscription["preferredSource"];
+    qualityProfile?: TvSubscription["qualityProfile"];
+    preferredReleaseGroups?: string[];
   };
   existing?: TvSubscription | null;
 };
 
 export function SubscribeModal({ isOpen, onClose, seed, existing }: Props) {
-  const { upsertTvSubscription, kaggleUsername, ghaConfig, easynewsConfig } = useAppStore();
+  const { upsertTvSubscription, kaggleUsername, ghaConfig, easynewsConfig, libraries } = useAppStore();
   const addToast = useToastStore((s) => s.addToast);
 
   const cloudWorkerAvailable = Boolean(kaggleUsername || ghaConfig?.enabled);
   const easynewsConfigured = Boolean(easynewsConfig?.username && easynewsConfig?.password);
 
   const [quality, setQuality] = useState<TvSubscription["qualityProfile"]>(
-    existing?.qualityProfile ?? "1080p"
+    existing?.qualityProfile ?? seed.qualityProfile ?? "1080p"
   );
   const [maxSizeGb, setMaxSizeGb] = useState<number>(existing?.maxSizeGb ?? 6);
   const [source, setSource] = useState<TvSubscription["preferredSource"]>(
-    existing?.preferredSource ?? "auto"
+    existing?.preferredSource ?? seed.preferredSource ?? "auto"
   );
   const [priority, setPriority] = useState<NonNullable<TvSubscription["sourcePriority"]>>(
     existing?.sourcePriority ?? "stremio_debrid"
   );
-  const [groups, setGroups] = useState<string[]>(existing?.preferredReleaseGroups ?? []);
+  const [groups, setGroups] = useState<string[]>(
+    existing?.preferredReleaseGroups ?? seed.preferredReleaseGroups ?? []
+  );
   const [customGroup, setCustomGroup] = useState("");
   const [transcode, setTranscode] = useState<boolean>(
     existing?.transcodeToMp4 ?? cloudWorkerAvailable
+  );
+  const [destPath, setDestPath] = useState<string>(
+    existing?.destinationRemotePath ?? seed.destinationRemotePath ?? ""
+  );
+  const [targetLibId, setTargetLibId] = useState<string>(
+    existing?.libraryId ?? seed.libraryId ?? libraries[0]?.id ?? ""
   );
 
   if (!isOpen) return null;
@@ -76,13 +90,18 @@ export function SubscribeModal({ isOpen, onClose, seed, existing }: Props) {
   };
 
   const handleSave = () => {
+    const finalDest = (existing?.destinationRemotePath ?? destPath).trim();
+    if (!finalDest) {
+      addToast("Please enter a destination remote path.", "error");
+      return;
+    }
     upsertTvSubscription({
       ...(existing || {}),
       seriesId: seed.seriesId,
       imdbId: existing?.imdbId ?? seed.imdbId,
       seriesTitle: seed.seriesTitle,
       posterUrl: seed.posterUrl,
-      libraryId: seed.libraryId,
+      libraryId: targetLibId || seed.libraryId,
       monitoredSeasons: existing?.monitoredSeasons ?? "all",
       qualityProfile: quality,
       preferredSource: source,
@@ -90,13 +109,16 @@ export function SubscribeModal({ isOpen, onClose, seed, existing }: Props) {
       preferredReleaseGroups: groups.length > 0 ? groups : undefined,
       maxSizeGb,
       transcodeToMp4: transcode,
-      destinationRemotePath: existing?.destinationRemotePath ?? seed.destinationRemotePath,
+      destinationRemotePath: finalDest,
+      subscriptionKind: existing?.subscriptionKind ?? seed.subscriptionKind,
+      lastGrabbedDate: existing?.lastGrabbedDate ?? seed.lastGrabbedDate,
+      lastGrabbedEpisode: existing?.lastGrabbedEpisode ?? seed.lastGrabbedEpisode,
       status: existing?.status ?? "active",
     });
     addToast(
       existing
         ? `Updated subscription for "${seed.seriesTitle}"`
-        : `Subscribed to "${seed.seriesTitle}"! Missing episodes will route to ${seed.destinationRemotePath}`,
+        : `Subscribed to "${seed.seriesTitle}"! New releases will route to ${finalDest}`,
       "success"
     );
     onClose();
@@ -177,6 +199,45 @@ export function SubscribeModal({ isOpen, onClose, seed, existing }: Props) {
               className="w-full h-1.5 appearance-none rounded-full cursor-pointer bg-muted accent-accent"
             />
           </div>
+
+          {/* Destination path (editable when seed had none) */}
+          {!existing?.destinationRemotePath && !seed.destinationRemotePath && (
+            <div className="space-y-2">
+              <div>
+                <label className="text-[11px] uppercase tracking-wider font-mono text-subtle mb-1.5 block">
+                  Target Library
+                </label>
+                <select
+                  value={targetLibId}
+                  onChange={(e) => {
+                    const libId = e.target.value;
+                    setTargetLibId(libId);
+                    const lib = libraries.find((l) => l.id === libId);
+                    if (lib?.remotePaths?.[0] && !destPath) {
+                      setDestPath(`${lib.remotePaths[0].replace(/\/+$/, "")}/${seed.seriesTitle}`);
+                    }
+                  }}
+                  className="input-field w-full text-xs"
+                >
+                  {libraries.map((l) => (
+                    <option key={l.id} value={l.id}>{l.name} ({l.type})</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-[11px] uppercase tracking-wider font-mono text-subtle mb-1.5 block">
+                  Destination Remote Path
+                </label>
+                <input
+                  type="text"
+                  value={destPath}
+                  onChange={(e) => setDestPath(e.target.value)}
+                  placeholder="e.g. gdrive:TV Shows/ShowName"
+                  className="input-field w-full text-xs font-mono"
+                />
+              </div>
+            </div>
+          )}
 
           {/* Preferred release groups */}
           <div>

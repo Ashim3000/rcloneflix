@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Search, SortAsc, BookOpen, Sparkles, RefreshCw, Heart, Globe, Plus } from "lucide-react";
 import { AddStreamBookmarkModal } from "../components/library/AddStreamBookmarkModal";
 import {
@@ -16,6 +16,7 @@ import { AdultPinLock } from "../components/adult/AdultPinLock";
 import { VirtualMediaGrid } from "../components/library/VirtualMediaGrid";
 import { MediaShelf } from "../components/library/MediaShelf";
 import { ScanBar } from "../components/common/ScanBar";
+import { TagFilterStrip } from "../components/common/TagFilterStrip";
 import { ExpiredPassBanner } from "../components/accessPass/ExpiredPassBanner";
 import { scanLibrary, refreshLibraryMetadata } from "../lib/scanner";
 import { AUDIO_EXTENSIONS } from "../lib/mediaTypes";
@@ -31,6 +32,13 @@ type Props = {
 
 export function LibraryPage({ libraryType }: Props) {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTag = searchParams.get("tag");
+  const [allLibrariesWithTag, setAllLibrariesWithTag] = useState(false);
+  const [bulkMode, setBulkMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [studioFilter, setStudioFilter] = useState("");
+  const [performerFilter, setPerformerFilter] = useState("");
   const [showAudiobookConverter, setShowAudiobookConverter] = useState(false);
   const [selectedBookForConvert, setSelectedBookForConvert] = useState<MediaItem[]>([]);
   const {
@@ -189,7 +197,16 @@ export function LibraryPage({ libraryType }: Props) {
   }, [mediaItems, watchProgress, matchingLibraries]);
 
   const filtered = useMemo(() => {
-    let items = [...allItems];
+    let items = activeTag && allLibrariesWithTag
+      ? deduplicateMediaItems(Object.values(mediaItems))
+      : [...allItems];
+    if (activeTag) {
+      items = items.filter((i) => i.userTags?.includes(activeTag));
+    }
+    if (libraryType === "adult") {
+      if (studioFilter) items = items.filter((i) => i.studio === studioFilter);
+      if (performerFilter) items = items.filter((i) => i.performers?.includes(performerFilter));
+    }
     if (onlyFavorites) {
       items = items.filter((i) => isItemFavorited(i, favorites, mediaItems));
     }
@@ -214,7 +231,22 @@ export function LibraryPage({ libraryType }: Props) {
       }
     });
     return items;
-  }, [allItems, search, sort, onlyFavorites, favorites]);
+  }, [allItems, mediaItems, activeTag, allLibrariesWithTag, libraryType, studioFilter, performerFilter, search, sort, onlyFavorites, favorites]);
+
+  const adultStudios = useMemo(
+    () =>
+      libraryType === "adult"
+        ? Array.from(new Set(allItems.map((i) => i.studio).filter(Boolean) as string[])).sort()
+        : [],
+    [allItems, libraryType]
+  );
+  const adultPerformers = useMemo(
+    () =>
+      libraryType === "adult"
+        ? Array.from(new Set(allItems.flatMap((i) => i.performers || []))).sort()
+        : [],
+    [allItems, libraryType]
+  );
 
   const handleItemClick = (item: MediaItem) => {
     navigate("/detail", { state: { item } });
@@ -430,14 +462,85 @@ export function LibraryPage({ libraryType }: Props) {
                 <Heart size={14} className={onlyFavorites ? "fill-red-400" : ""} />
                 <span>Favorites</span>
               </button>
+              {libraryType === "adult" && adultStudios.length > 0 && (
+                <select
+                  value={studioFilter}
+                  onChange={(e) => setStudioFilter(e.target.value)}
+                  className="input-field py-2 text-sm cursor-pointer"
+                >
+                  <option value="">All Studios</option>
+                  {adultStudios.map((st) => (
+                    <option key={st} value={st}>{st}</option>
+                  ))}
+                </select>
+              )}
+              {libraryType === "adult" && adultPerformers.length > 0 && (
+                <select
+                  value={performerFilter}
+                  onChange={(e) => setPerformerFilter(e.target.value)}
+                  className="input-field py-2 text-sm cursor-pointer"
+                >
+                  <option value="">All Performers</option>
+                  {adultPerformers.map((pf) => (
+                    <option key={pf} value={pf}>{pf}</option>
+                  ))}
+                </select>
+              )}
             </div>
+
+            <TagFilterStrip
+              items={allItems}
+              activeTag={activeTag}
+              onSelectTag={(t) => {
+                if (t) setSearchParams({ tag: t });
+                else {
+                  setSearchParams({});
+                  setAllLibrariesWithTag(false);
+                }
+              }}
+              allLibraries={allLibrariesWithTag}
+              onToggleAllLibraries={() => setAllLibrariesWithTag((v) => !v)}
+              bulkMode={bulkMode}
+              onToggleBulkMode={() => {
+                setBulkMode((v) => !v);
+                setSelectedIds([]);
+              }}
+              selectedIds={selectedIds}
+              onClearSelection={() => {
+                setSelectedIds([]);
+                setBulkMode(false);
+              }}
+            />
 
             {/* Grid */}
             {filtered.length === 0 ? (
               <div className="px-8 py-12 text-center">
                 <p className="text-subtle font-body text-sm">
-                  {search ? "No matches found." : "This library is empty."}
+                  {search || activeTag ? "No matches found." : "This library is empty."}
                 </p>
+              </div>
+            ) : bulkMode ? (
+              <div className="px-8 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3 pb-8">
+                {filtered.map((item) => {
+                  const sel = selectedIds.includes(item.id);
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() =>
+                        setSelectedIds((prev) =>
+                          sel ? prev.filter((id) => id !== item.id) : [...prev, item.id]
+                        )
+                      }
+                      className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                        sel ? "border-accent bg-accent/15" : "border-border bg-panel hover:border-accent/40"
+                      }`}
+                    >
+                      <p className="text-xs font-medium text-bright truncate">{item.title}</p>
+                      <p className="text-[10px] text-subtle mt-0.5">{sel ? "Selected" : "Click to select"}</p>
+                    </button>
+                  );
+                })}
               </div>
             ) : (
               <VirtualMediaGrid
