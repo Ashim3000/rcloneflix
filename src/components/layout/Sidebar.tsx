@@ -11,6 +11,8 @@ import { scanAllLibraries } from "../../lib/scanner";
 import { AddStreamBookmarkModal } from "../library/AddStreamBookmarkModal";
 import { ProviderSearchModal } from "../discovery/ProviderSearchModal";
 import { isTvEnvironment } from "../../lib/tvNavigation";
+import { Activity } from "lucide-react";
+import { ActivityDrawer, useActiveJobsCount } from "./ActivityDrawer";
 
 const NAV_ITEMS = [
   { path: "/home",       label: "Home",           icon: Home,          type: null },
@@ -50,6 +52,8 @@ export function Sidebar({
   const [version, setVersion] = useState("");
   const [showAddBookmarkModal, setShowAddBookmarkModal] = useState(false);
   const [showProviderSearch, setShowProviderSearch] = useState(false);
+  const [showActivityDrawer, setShowActivityDrawer] = useState(false);
+  const activeJobsCount = useActiveJobsCount();
   const [usenetConfigured, setUsenetConfigured] = useState(false);
 
   useEffect(() => {
@@ -267,6 +271,25 @@ export function Sidebar({
           </button>
 
           <button
+            type="button"
+            onClick={() => setShowActivityDrawer(true)}
+            title="Activity Center (Transfers, Transcodes & Scans)"
+            className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg font-body text-sm text-subtle hover:text-text hover:bg-panel/60 transition-all ${
+              collapsed ? "md:justify-center md:px-0" : ""
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <Activity size={16} className="flex-shrink-0 text-accent" />
+              <span className={collapsed ? "md:hidden" : ""}>Activity</span>
+            </div>
+            {activeJobsCount > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full bg-accent text-void font-mono text-[10px] font-bold">
+                {activeJobsCount}
+              </span>
+            )}
+          </button>
+
+          <button
             onClick={() => scanAllLibraries()}
             disabled={isScanning}
             title={isScanning ? "Scanning Libraries..." : "Scan Libraries"}
@@ -326,6 +349,10 @@ export function Sidebar({
       <ProviderSearchModal
         isOpen={showProviderSearch}
         onClose={() => setShowProviderSearch(false)}
+      />
+      <ActivityDrawer
+        isOpen={showActivityDrawer}
+        onClose={() => setShowActivityDrawer(false)}
       />
     </>
   );

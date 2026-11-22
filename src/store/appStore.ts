@@ -16,6 +16,7 @@ export type GalleryPhoto = {
   id: string;
   arweaveId?: string;
   arweaveUrl?: string;
+  catboxUrl?: string;
   remotePath?: string;
   remoteOriginalPath?: string;
   remotePreviewPath?: string;
@@ -196,7 +197,7 @@ export type MediaItem = {
   duration?: number;
   metadataId?: string;
   metadataSource?: "cinemeta" | "tmdb" | "musicbrainz" | "openlibrary" | "audnexus" | "theporndb" | "manual" | "itunes" | "deezer" | "googlebooks";
-  metadataConfidence?: "high" | "low" | "manual";
+  metadataConfidence?: "high" | "medium" | "low" | "manual";
   addedAt: number;
   lastScannedAt: number;
   // TV
@@ -423,6 +424,9 @@ export type RcloneSettings = {
   tpsLimit: number;
   tpsLimitBurst: number;
   autoScanOnStartup: boolean;
+  bwLimit?: string | null;
+  softDeleteEnabled?: boolean;
+  softDeleteTrashDir?: string;
 };
 
 export const defaultRcloneSettings: RcloneSettings = {
@@ -433,6 +437,9 @@ export const defaultRcloneSettings: RcloneSettings = {
   tpsLimit: 4,
   tpsLimitBurst: 2,
   autoScanOnStartup: false,
+  bwLimit: null,
+  softDeleteEnabled: false,
+  softDeleteTrashDir: ".rcloneflix_trash",
 };
 
 export type EasynewsConfig = {
@@ -1471,8 +1478,18 @@ export const useAppStore = create<AppStore>()(
           items.forEach((i) => { n[i.id] = i; });
           return { mediaItems: n };
         }),
-      updateItemMetadata: (id, updates) =>
-        set((s) => ({ mediaItems: { ...s.mediaItems, [id]: { ...s.mediaItems[id], ...updates } } })),
+      updateItemMetadata: (id, updates) => {
+        let updatedItem: MediaItem | null = null;
+        set((s) => {
+          const cur = s.mediaItems[id];
+          if (!cur) return s;
+          updatedItem = { ...cur, ...updates };
+          return { mediaItems: { ...s.mediaItems, [id]: updatedItem } };
+        });
+        if (updatedItem) {
+          import("../lib/libraryDb").then(({ persistItems }) => persistItems([updatedItem!])).catch(() => {});
+        }
+      },
       setItemUserTags: (itemId, tags) => {
         const clean = Array.from(new Set(tags.map((t) => t.trim()).filter(Boolean)));
         let updatedItem: MediaItem | null = null;

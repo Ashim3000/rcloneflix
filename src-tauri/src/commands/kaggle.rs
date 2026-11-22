@@ -203,10 +203,13 @@ pub async fn test_kaggle_connection(
         }
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    static KAGGLE_CLIENT_15S: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = KAGGLE_CLIENT_15S.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
 
     let test_url = format!("https://www.kaggle.com/api/v1/kernels/list?user={}&pageSize=1", u);
     let res = client
@@ -958,10 +961,13 @@ pub async fn dispatch_kaggle_transcode(
         "enableInternet": true
     });
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    static KAGGLE_CLIENT_30S: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = KAGGLE_CLIENT_30S.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
 
     let payload_str = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
 
@@ -1721,10 +1727,13 @@ pub async fn dispatch_kaggle_transfer(
         "enableInternet": true
     });
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    static KAGGLE_CLIENT_30S: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = KAGGLE_CLIENT_30S.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
 
     let payload_str = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
 
@@ -1795,10 +1804,13 @@ pub async fn get_kaggle_transcode_status(
 
     let (user, slug) = parse_kaggle_user_and_slug(&kernel_slug, &creds.username);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    static KAGGLE_CLIENT_15S: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = KAGGLE_CLIENT_15S.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
 
     let url = format!(
         "https://www.kaggle.com/api/v1/kernels/status?userName={}&kernelSlug={}",
@@ -1855,10 +1867,13 @@ pub async fn get_kaggle_transcode_output(
 
     let (user, slug) = parse_kaggle_user_and_slug(&kernel_slug, &creds.username);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    static KAGGLE_CLIENT_15S: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = KAGGLE_CLIENT_15S.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
 
     let url = format!(
         "https://www.kaggle.com/api/v1/kernels/output?userName={}&kernelSlug={}",
@@ -2221,10 +2236,13 @@ pub async fn dispatch_kaggle_align(
         "enableInternet": true
     });
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    static KAGGLE_CLIENT_30S: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = KAGGLE_CLIENT_30S.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
 
     let payload_str = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
 
@@ -2537,10 +2555,13 @@ pub async fn dispatch_kaggle_rd_seed(
         "enableInternet": true
     });
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    static KAGGLE_CLIENT_30S: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = KAGGLE_CLIENT_30S.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
 
     let payload_str = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
 

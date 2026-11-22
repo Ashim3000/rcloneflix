@@ -42,6 +42,9 @@ import { getLogPath, readLogTail } from "../lib/log";
 import { backupToRemote, restoreFromRemote, BACKUP_FILE } from "../lib/rcloneSync";
 import { artworkCacheStats, clearArtworkCache } from "../lib/artwork";
 import { RemoteBrowser } from "../components/common/RemoteBrowser";
+import { VirtualRemoteCreateModal } from "../components/explorer/RcloneSuiteToolbar";
+import { isAndroidRuntime, isValidSoftDeleteTrashDir } from "../lib/rcloneNative";
+import { DiagnosticsQolCards } from "../components/settings/DiagnosticsQolCards";
 import { pickLocalFolder, vaultPhotoCacheStats, clearVaultPhotoCache, rcloneCreateCryptRemote, rcloneCreateWebdavRemote, pickRcloneConfig, parseRcloneConfig, saveRcloneSettings } from "../lib/tauri";
 import { ensureGitHubWorkerReady, DEFAULT_GHA_WORKER_REPO } from "../lib/githubWorkerProvisioner";
 import { testStashBoxConnection, type StashBoxProvider } from "../lib/stashBox";
@@ -177,14 +180,33 @@ export function SettingsPage() {
     }
   }, [rcloneSettings]);
 
+  const [showVirtualRemoteModal, setShowVirtualRemoteModal] = useState(false);
+
   const handleSaveRcloneSettings = async () => {
-    setRcloneSettings(localRclone);
+    const rawTrash = (localRclone.softDeleteTrashDir ?? ".rcloneflix_trash").trim().replace(/^\/+|\/+$/g, "");
+    if (localRclone.softDeleteEnabled && rawTrash && !isValidSoftDeleteTrashDir(rawTrash)) {
+      useToastStore.getState().addToast(
+        "App Trash Folder Name may only contain letters, numbers, '.', '_', and '-' (no spaces, slashes, or glob characters).",
+        "error"
+      );
+      return;
+    }
+    const safeTrashDir = isValidSoftDeleteTrashDir(rawTrash) ? rawTrash : ".rcloneflix_trash";
+    const normalized: RcloneSettings = {
+      ...localRclone,
+      bwLimit: localRclone.bwLimit?.trim() ? localRclone.bwLimit.trim() : null,
+      softDeleteTrashDir: safeTrashDir,
+    };
     try {
-      await saveRcloneSettings(localRclone);
-    } catch {}
-    setSavedRclone(true);
-    useToastStore.getState().addToast("Rclone streaming & rate limiting settings saved!", "success");
-    setTimeout(() => setSavedRclone(false), 2500);
+      await saveRcloneSettings(normalized);
+      setRcloneSettings(normalized);
+      setLocalRclone(normalized);
+      setSavedRclone(true);
+      useToastStore.getState().addToast("Rclone streaming & rate limiting settings saved!", "success");
+      setTimeout(() => setSavedRclone(false), 2500);
+    } catch (err: any) {
+      useToastStore.getState().addToast(`Failed to save Rclone settings: ${err?.message || err}`, "error");
+    }
   };
 
   // Access Pass modals
@@ -1584,8 +1606,20 @@ export function SettingsPage() {
                   >
                     <Plus size={12} /> Add WebDAV / Telegram
                   </button>
+                  {!isAndroidRuntime() && (
+                    <button
+                      type="button"
+                      onClick={() => setShowVirtualRemoteModal(true)}
+                      className="btn-secondary text-xs py-1.5 px-2.5 flex items-center gap-1.5 text-accent"
+                    >
+                      <Plus size={12} /> Union / Combine Pool
+                    </button>
+                  )}
                 </div>
               </div>
+              {showVirtualRemoteModal && (
+                <VirtualRemoteCreateModal onClose={() => setShowVirtualRemoteModal(false)} />
+              )}
 
               {/* Active Config Path Banner */}
               <div className="flex items-center justify-between gap-3 px-3 py-2 bg-panel/60 border border-border/80 rounded-lg text-xs mb-3 font-mono">
@@ -1999,6 +2033,110 @@ export function SettingsPage() {
                 </div>
               </div>
 
+              {/* Bandwidth Limit & Soft-Delete App Trash (Desktop Only) */}
+              {!isAndroidRuntime() && (
+                <div className="space-y-4 pt-2 border-t border-border/60">
+                  <div>
+                    <label className="text-sm font-heading font-medium text-white mb-1.5 block">
+                      Background Bandwidth Limit / Timetable (--bwlimit)
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={localRclone.bwLimit || ""}
+                        onChange={(e) =>
+                          setLocalRclone({
+                            ...localRclone,
+                            bwLimit: e.target.value || null,
+                          })
+                        }
+                        placeholder="e.g. 10M or 08:00,5M 23:00,off (leave blank for unlimited)"
+                        className="input-field text-sm font-mono flex-1"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setLocalRclone({ ...localRclone, bwLimit: "5M" })}
+                        className="btn-secondary text-xs px-2.5"
+                      >
+                        5M Safe
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLocalRclone({ ...localRclone, bwLimit: "08:00,5M 23:00,off" })}
+                        className="btn-secondary text-xs px-2.5"
+                      >
+                        Day/Night
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLocalRclone({ ...localRclone, bwLimit: null })}
+                        className="btn-secondary text-xs px-2.5"
+                      >
+                        Unlimited
+                      </button>
+                    </div>
+                    <p className="text-xs text-subtle mt-1">
+                      Applies per background copy/move/bisync process (never throttles live media playback).
+                    </p>
+                  </div>
+
+                  <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="pr-4">
+                        <p className="font-heading font-semibold text-white text-sm">
+                          Soft-Delete to App Trash Folder (moveto)
+                        </p>
+                        <p className="text-subtle font-body text-xs mt-1">
+                          Moves deleted Cloud Explorer items into a timestamped trash folder on the same remote instead of permanent deletion. Excluded from library scans.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setLocalRclone({
+                            ...localRclone,
+                            softDeleteEnabled: !localRclone.softDeleteEnabled,
+                          })
+                        }
+                        className={`w-12 h-6 flex items-center rounded-full p-1 transition-colors duration-200 shrink-0 ${
+                          localRclone.softDeleteEnabled ? "bg-accent" : "bg-border"
+                        }`}
+                      >
+                        <div
+                          className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform duration-200 ${
+                            localRclone.softDeleteEnabled ? "translate-x-6" : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </div>
+                    {localRclone.softDeleteEnabled && (
+                      <div>
+                        <label className="text-xs text-subtle block mb-1">
+                          App Trash Folder Name (letters, numbers, ., _, - only; changing this leaves older trash in the previous folder)
+                        </label>
+                        <input
+                          type="text"
+                          value={localRclone.softDeleteTrashDir || ".rcloneflix_trash"}
+                          onChange={(e) =>
+                            setLocalRclone({
+                              ...localRclone,
+                              softDeleteTrashDir: e.target.value,
+                            })
+                          }
+                          className="input-field text-xs font-mono w-full"
+                        />
+                        {Boolean(localRclone.softDeleteTrashDir?.trim()) &&
+                          !isValidSoftDeleteTrashDir(localRclone.softDeleteTrashDir || "") && (
+                            <p className="text-[11px] text-rose-400 mt-1">
+                              Invalid folder name: use only letters, numbers, &apos;.&apos;, &apos;_&apos;, and &apos;-&apos; (not &apos;.&apos; or &apos;..&apos;).
+                            </p>
+                          )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Rescan Safeguards */}
               <div className="bg-panel border border-border rounded-xl p-4 flex items-center justify-between">
                 <div className="pr-4">
@@ -2161,6 +2299,8 @@ export function SettingsPage() {
                 Everything the app does is written here — attach this when reporting a problem.
               </p>
             </div>
+
+            <DiagnosticsQolCards />
 
             <div className="bg-panel border border-border rounded-xl p-4">
               <p className="text-subtle font-body text-[10px] uppercase tracking-wider mb-1">Log file</p>

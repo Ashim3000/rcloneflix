@@ -23,6 +23,11 @@ import { AUDIO_EXTENSIONS } from "../lib/mediaTypes";
 import { AudiobookConverterModal } from "../components/audiobooks/AudiobookConverterModal";
 import { refreshSimklDiscovery } from "../lib/simkl";
 import { annotateWithLibraryMatch, resolveDiscoveryCardNavigation } from "../lib/discoveryMatching";
+import {
+  SmartCollectionBar,
+  applySmartPresetFilter,
+  type SmartPresetId,
+} from "../components/common/SmartCollectionBar";
 
 type SortKey = "addedAt" | "title" | "year" | "rating";
 
@@ -196,10 +201,15 @@ export function LibraryPage({ libraryType }: Props) {
     );
   }, [mediaItems, watchProgress, matchingLibraries]);
 
+  const [smartPreset, setSmartPreset] = useState<SmartPresetId>("all");
+
   const filtered = useMemo(() => {
     let items = activeTag && allLibrariesWithTag
       ? deduplicateMediaItems(Object.values(mediaItems))
       : [...allItems];
+    if (smartPreset !== "all") {
+      items = applySmartPresetFilter(items, smartPreset, watchProgress);
+    }
     if (activeTag) {
       items = items.filter((i) => i.userTags?.includes(activeTag));
     }
@@ -231,7 +241,7 @@ export function LibraryPage({ libraryType }: Props) {
       }
     });
     return items;
-  }, [allItems, mediaItems, activeTag, allLibrariesWithTag, libraryType, studioFilter, performerFilter, search, sort, onlyFavorites, favorites]);
+  }, [allItems, mediaItems, activeTag, allLibrariesWithTag, libraryType, studioFilter, performerFilter, search, sort, onlyFavorites, favorites, smartPreset, watchProgress]);
 
   const adultStudios = useMemo(
     () =>
@@ -510,6 +520,11 @@ export function LibraryPage({ libraryType }: Props) {
                 setSelectedIds([]);
                 setBulkMode(false);
               }}
+            />
+
+            <SmartCollectionBar
+              activePreset={smartPreset}
+              onSelectPreset={setSmartPreset}
             />
 
             {/* Grid */}

@@ -318,6 +318,16 @@ export function CloudTransferModal({
     }
 
     setIsSubmitting(true);
+    if (!isDestLocal && sourceType !== "url" && totalSizeBytes > 0) {
+      import("../../lib/rcloneNative")
+        .then(({ checkRemoteFreeSpaceWarning }) =>
+          checkRemoteFreeSpaceWarning(destRemote, totalSizeBytes, "transfer")
+        )
+        .then((warn) => {
+          if (warn) useToastStore.getState().addToast(warn, "info");
+        })
+        .catch(() => {});
+    }
 
     try {
       const jobId = `transfer-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;

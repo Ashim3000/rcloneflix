@@ -27,6 +27,15 @@ import {
   isDropmbEligibleExtension,
 } from "../../lib/dropmbOffload";
 import { offloadExplorerItemToTelegram } from "../../lib/telegramOffload";
+import { RcloneSuiteToolbar, VerifyChecksumButton } from "../../components/explorer/RcloneSuiteToolbar";
+import {
+  restoreFromRcloneFlixAppTrash,
+  inspectAppTrashPath,
+  classifyDeleteItems,
+  checkRemoteFreeSpaceWarning,
+  notifyRemoteMutated,
+  isAndroidRuntime,
+} from "../../lib/rcloneNative";
 
 type RcloneListItem = {
   name: string;
@@ -613,6 +622,7 @@ export function CloudExplorerPage() {
           });
         }
         useToastStore.getState().addToast(`Uploaded ${files.length} file(s)!`, "success");
+        notifyRemoteMutated(selectedRemote);
         fetchDirectory();
       } catch (err: any) {
         useToastStore.getState().addToast(`Upload failed: ${err?.message || err}`, "error");
@@ -647,6 +657,7 @@ export function CloudExplorerPage() {
           });
         }
         useToastStore.getState().addToast(`Uploaded ${paths.length} file(s)!`, "success");
+        notifyRemoteMutated(selectedRemote);
         fetchDirectory();
       } catch (err: any) {
         useToastStore.getState().addToast(`Upload failed: ${err?.message || err}`, "error");
@@ -683,6 +694,7 @@ export function CloudExplorerPage() {
           remotePath: dest,
         });
         useToastStore.getState().addToast(`Folder "${folderName}" uploaded!`, "success");
+        notifyRemoteMutated(selectedRemote);
         fetchDirectory();
       } catch (err: any) {
         useToastStore.getState().addToast(`Folder upload failed: ${err?.message || err}`, "error");
@@ -787,6 +799,11 @@ export function CloudExplorerPage() {
       ? currentPath
       : `${selectedRemote}:${currentPath}`;
     setExtractingPath(sourceRemotePath);
+    if (!isLocalRemote && item.size > 0) {
+      void checkRemoteFreeSpaceWarning(selectedRemote, item.size, "archive extraction").then((spaceWarn) => {
+        if (spaceWarn) useToastStore.getState().addToast(spaceWarn, "info");
+      });
+    }
     useToastStore.getState().addToast(`Extracting ${item.name}...`, "info");
     try {
       const target = await invoke<string>("extract_remote_archive_to_remote", {
@@ -795,6 +812,7 @@ export function CloudExplorerPage() {
         destRemoteDir,
       });
       useToastStore.getState().addToast(`Extracted to ${target}`, "success");
+      notifyRemoteMutated(selectedRemote);
       fetchDirectory();
     } catch (err: any) {
       useToastStore.getState().addToast(`Extraction failed: ${err?.message || err}`, "error");
@@ -1130,6 +1148,18 @@ export function CloudExplorerPage() {
 
   const handleDeleteConfirmed = async () => {
     if (!deleteTarget || deleteTarget.length === 0) return;
+    const delClass = classifyDeleteItems(
+      selectedRemote,
+      currentPath,
+      deleteTarget.map((it) => it.name),
+      isLocalRemote
+    );
+    if (delClass.mode === "mixed") {
+      useToastStore
+        .getState()
+        .addToast(`Select the App Trash folder (${delClass.trashDir}) separately from other items.`, "error");
+      return;
+    }
     setIsDeleting(true);
     let successCount = 0;
     try {
@@ -1143,11 +1173,16 @@ export function CloudExplorerPage() {
         successCount++;
       }
       useToastStore.getState().addToast(
-        deleteTarget.length === 1
+        delClass.mode === "soft"
+          ? deleteTarget.length === 1
+            ? `Moved "${deleteTarget[0].name}" to App Trash (${delClass.trashDir})`
+            : `Moved ${successCount} items to App Trash (${delClass.trashDir})`
+          : deleteTarget.length === 1
           ? `Deleted "${deleteTarget[0].name}"`
           : `Deleted ${successCount} items`,
         "info"
       );
+      notifyRemoteMutated(selectedRemote);
       setDeleteTarget(null);
       setSelectedItemNames(new Set());
       fetchDirectory();
@@ -1308,7 +1343,7 @@ export function CloudExplorerPage() {
           {selectedRemote && !isLocalRemote && (
             activeMount && !activeMount.managed ? (
               <span
-                title={`Mounted externally at ${activeMount.mount_point}`}
+                title={`Mounted externally at ${activeMount.mount_point} (external mounts are not auto-refreshed by RcloneFlix)`}
                 className="px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-mono flex items-center gap-1.5"
               >
                 <HardDrive size={13} />
@@ -1318,7 +1353,7 @@ export function CloudExplorerPage() {
               <button
                 onClick={handleToggleFuseMount}
                 disabled={mountingRemote}
-                title={activeMount?.managed ? `Unmount ${activeMount.mount_point}` : `Mount ${selectedRemote}: via FUSE to ~/RcloneFlixMounts/${selectedRemote}`}
+                title={activeMount?.managed ? `Unmount ${activeMount.mount_point} (auto-refreshed via RC)` : `Mount ${selectedRemote}: via FUSE to ~/RcloneFlixMounts/${selectedRemote}`}
                 className={`px-3 py-1.5 rounded-xl border text-xs font-mono flex items-center gap-1.5 transition-all disabled:opacity-50 ${
                   activeMount?.managed
                     ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-300 hover:bg-rose-500/15 hover:border-rose-500/30 hover:text-rose-300"
@@ -1330,6 +1365,13 @@ export function CloudExplorerPage() {
               </button>
             )
           )}
+
+          <RcloneSuiteToolbar
+            selectedRemote={selectedRemote}
+            currentPath={currentPath}
+            isLocalRemote={isLocalRemote}
+            onMutated={fetchDirectory}
+          />
 
           <input
             ref={fileUploadRef}
@@ -2200,6 +2242,7 @@ export function CloudExplorerPage() {
           initialWorker={transferTarget.initialWorker}
           onDispatched={() => {
             setSelectedItemNames(new Set());
+            notifyRemoteMutated();
             fetchDirectory();
             setShowTransferDrawer(true);
           }}
@@ -2301,39 +2344,80 @@ export function CloudExplorerPage() {
       )}
 
       {/* Delete Confirmation Modal */}
-      {deleteTarget && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-panel border border-danger/40 rounded-2xl p-6 w-full max-w-md shadow-2xl space-y-4">
-            <div className="flex items-center gap-2.5 text-danger">
-              <AlertCircle size={22} />
-              <h3 className="font-display text-lg text-bright">Confirm Deletion</h3>
-            </div>
-            <p className="text-xs text-text font-body leading-relaxed">
-              Are you sure you want to permanently delete{" "}
-              <span className="font-bold font-mono text-danger">
-                {deleteTarget.length === 1 ? deleteTarget[0].name : `${deleteTarget.length} items`}
-              </span>{" "}
-              from <span className="font-mono text-accent">{selectedRemote}:</span>? This operation cannot be undone.
-            </p>
-            <div className="flex justify-end gap-2.5 pt-2">
-              <button
-                onClick={() => setDeleteTarget(null)}
-                className="btn-secondary text-xs py-2 px-4"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleDeleteConfirmed}
-                disabled={isDeleting}
-                className="px-4 py-2 rounded-xl bg-danger hover:bg-danger/80 text-white font-body text-xs font-semibold flex items-center gap-1.5 transition-all"
-              >
-                {isDeleting && <Loader2 size={13} className="animate-spin" />}
-                <span>Delete Permanently</span>
-              </button>
+      {deleteTarget && (() => {
+        const delClass = classifyDeleteItems(
+          selectedRemote,
+          currentPath,
+          deleteTarget.map((it) => it.name),
+          isLocalRemote
+        );
+        return (
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-panel border border-danger/40 rounded-2xl p-6 w-full max-w-md shadow-2xl space-y-4">
+              <div className="flex items-center gap-2.5 text-danger">
+                <AlertCircle size={22} />
+                <h3 className="font-display text-lg text-bright">
+                  {delClass.mode === "soft"
+                    ? "Move to RcloneFlix App Trash"
+                    : delClass.mode === "mixed"
+                    ? "Select App Trash Folder Separately"
+                    : "Confirm Deletion"}
+                </h3>
+              </div>
+              <p className="text-xs text-text font-body leading-relaxed">
+                {delClass.mode === "soft" ? (
+                  <>
+                    Move{" "}
+                    <span className="font-bold font-mono text-bright">
+                      {deleteTarget.length === 1 ? deleteTarget[0].name : `${deleteTarget.length} items`}
+                    </span>{" "}
+                    into{" "}
+                    <span className="font-mono text-accent">
+                      {selectedRemote}:{delClass.trashDir}/&lt;timestamp&gt;/
+                    </span>
+                    ? You can restore or permanently empty them later from Cloud Explorer.
+                  </>
+                ) : delClass.mode === "mixed" ? (
+                  <>
+                    Cannot delete the App Trash folder (<span className="font-mono text-danger">{delClass.trashDir}</span>) in the same batch as other items (purging the trash folder would destroy the newly soft-deleted items). Deselect{" "}
+                    <span className="font-mono text-bright">{delClass.trashDir}</span> or select it alone to empty it.
+                  </>
+                ) : (
+                  <>
+                    Are you sure you want to permanently delete{" "}
+                    <span className="font-bold font-mono text-danger">
+                      {deleteTarget.length === 1 ? deleteTarget[0].name : `${deleteTarget.length} items`}
+                    </span>{" "}
+                    from <span className="font-mono text-accent">{selectedRemote}{isLocalRemote ? "" : ":"}</span>? This operation cannot be undone.
+                  </>
+                )}
+              </p>
+              <div className="flex justify-end gap-2.5 pt-2">
+                <button
+                  onClick={() => setDeleteTarget(null)}
+                  className="btn-secondary text-xs py-2 px-4"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleDeleteConfirmed}
+                  disabled={isDeleting || delClass.mode === "mixed"}
+                  className="px-4 py-2 rounded-xl bg-danger hover:bg-danger/80 text-white font-body text-xs font-semibold flex items-center gap-1.5 transition-all disabled:opacity-50"
+                >
+                  {isDeleting && <Loader2 size={13} className="animate-spin" />}
+                  <span>
+                    {delClass.mode === "soft"
+                      ? "Move to App Trash"
+                      : delClass.mode === "mixed"
+                      ? "Select Trash Separately"
+                      : "Delete Permanently"}
+                  </span>
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* File Info Modal */}
       {fileInfoTarget && (
@@ -2413,7 +2497,42 @@ export function CloudExplorerPage() {
               )}
             </div>
 
-            <div className="flex justify-end gap-2 pt-1">
+            {!isAndroidRuntime() && !isLocalRemote && (() => {
+              const trashInfo = inspectAppTrashPath(fileInfoTarget.fullPath);
+              if (trashInfo.isTimestampRoot) {
+                return (
+                  <p className="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
+                    This is a timestamped trash snapshot folder ({trashInfo.trashDirName}). Open this folder to restore individual items inside it.
+                  </p>
+                );
+              }
+              return null;
+            })()}
+
+            <div className="flex flex-wrap justify-end gap-2 pt-1">
+              {!isAndroidRuntime() && !isLocalRemote && !fileInfoTarget.item.is_dir && (
+                <VerifyChecksumButton fullPath={fileInfoTarget.fullPath} />
+              )}
+              {!isAndroidRuntime() &&
+                !isLocalRemote &&
+                inspectAppTrashPath(fileInfoTarget.fullPath).canRestore && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const restored = await restoreFromRcloneFlixAppTrash(fileInfoTarget.fullPath);
+                        useToastStore.getState().addToast(`Restored to ${restored}`, "success");
+                        closeFileInfo();
+                        fetchDirectory();
+                      } catch (err: any) {
+                        useToastStore.getState().addToast(`Restore failed: ${err?.message || err}`, "error");
+                      }
+                    }}
+                    className="btn-primary text-xs py-2 px-3"
+                  >
+                    Restore from App Trash
+                  </button>
+                )}
               <button
                 onClick={closeFileInfo}
                 className="btn-secondary text-xs py-2 px-4"

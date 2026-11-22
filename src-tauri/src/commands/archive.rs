@@ -1466,6 +1466,7 @@ pub async fn extract_remote_archive_to_remote(
             String::from_utf8_lossy(&up_out.stderr)
         ));
     }
+    crate::commands::rclone::spawn_best_effort_vfs_refresh(&app, &target_remote);
     Ok(target_remote)
 }
 

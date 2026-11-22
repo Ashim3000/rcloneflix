@@ -78,8 +78,9 @@ export async function testStashBoxConnection(provider: StashBoxProvider): Promis
 
 export async function findScenesByFingerprint(
   provider: StashBoxProvider,
-  fp: { hash: string; algorithm: "OSHASH" | "PHASH"; duration?: number }
+  fp: { hash: string; algorithm: "OSHASH" | "PHASH" }
 ): Promise<StashSceneMatch[]> {
+  const cleanHash = fp.hash.trim().toLowerCase();
   const query = `
     query FindScenesBySceneFingerprints($fingerprints: [[FingerprintQueryInput!]!]!) {
       findScenesBySceneFingerprints(fingerprints: $fingerprints) {
@@ -92,8 +93,8 @@ export async function findScenesByFingerprint(
       }
     }
   `;
-  const input: Record<string, any> = { hash: fp.hash, algorithm: fp.algorithm };
-  if (fp.duration && fp.duration > 0) input.duration = Math.round(fp.duration);
+  // Stash-Box FingerprintQueryInput only accepts { hash, algorithm } — never pass duration here.
+  const input = { hash: cleanHash, algorithm: fp.algorithm };
 
   const res = await httpFetch(provider.endpoint.trim(), {
     method: "POST",
@@ -103,10 +104,119 @@ export async function findScenesByFingerprint(
     },
     body: JSON.stringify({ query, variables: { fingerprints: [[input]] } }),
   });
-  if (!res.ok) throw new Error(`Stash-Box HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`${provider.name || "Stash-Box"} HTTP ${res.status}`);
   const json = await res.json();
+  if (json.errors?.length) {
+    throw new Error(json.errors[0].message || `${provider.name || "Stash-Box"} GraphQL error`);
+  }
   const list = json?.data?.findScenesBySceneFingerprints?.[0] || [];
   return Array.isArray(list) ? list.map(mapStashScene) : [];
+}
+
+function mapThePornDbScene(s: any): StashSceneMatch {
+  return {
+    id: String(s.id ?? s._id ?? ""),
+    title: s.title || "Untitled Scene",
+    date: s.date || undefined,
+    details: s.description || s.details || undefined,
+    posterUrl: s.posters?.large || s.poster || s.image || s.background?.large || undefined,
+    studio: s.site?.name || undefined,
+    performers: (s.performers || []).map((p: any) => p?.name || p?.parent?.name).filter(Boolean),
+    tags: (s.tags || []).map((t: any) => t?.name).filter(Boolean),
+    source: "theporndb",
+  };
+}
+
+export async function findThePornDbScenesByHash(
+  hash: string,
+  thePornDbApiKey: string,
+  algorithm: "OSHASH" | "PHASH"
+): Promise<StashSceneMatch[]> {
+  const key = thePornDbApiKey.trim();
+  const cleanHash = hash.trim().toLowerCase();
+  if (!key || !cleanHash) return [];
+
+  const headers = {
+    Authorization: `Bearer ${key}`,
+    Accept: "application/json",
+  };
+
+  const res = await httpFetch(
+    `https://api.theporndb.net/scenes?hash=${encodeURIComponent(cleanHash)}&hashType=${encodeURIComponent(algorithm)}`,
+    { headers }
+  );
+  if (!res.ok) {
+    throw new Error(`ThePornDB HTTP ${res.status}`);
+  }
+  const json = await res.json();
+  const rawList = Array.isArray(json?.data) ? json.data : json?.data ? [json.data] : [];
+  if (rawList.length > 0) {
+    return rawList.map(mapThePornDbScene).filter((m: StashSceneMatch) => Boolean(m.id));
+  }
+
+  // Fallback path-based hash lookup (/scenes/hash/{hash})
+  const fallbackRes = await httpFetch(
+    `https://api.theporndb.net/scenes/hash/${encodeURIComponent(cleanHash)}`,
+    { headers }
+  );
+  if (!fallbackRes.ok) return [];
+  const fbJson = await fallbackRes.json();
+  const fbList = Array.isArray(fbJson?.data) ? fbJson.data : fbJson?.data ? [fbJson.data] : [];
+  return fbList.map(mapThePornDbScene).filter((m: StashSceneMatch) => Boolean(m.id));
+}
+
+export type IdentifyByHashResult = {
+  matches: StashSceneMatch[];
+  queriedProviders: string[];
+  errors: string[];
+};
+
+export async function identifyByHash(params: {
+  hash: string;
+  algorithm: "OSHASH" | "PHASH";
+  provider: StashBoxProvider | null;
+  thePornDbApiKey?: string;
+}): Promise<IdentifyByHashResult> {
+  const { hash, algorithm, provider, thePornDbApiKey } = params;
+  const queriedProviders: string[] = [];
+  const errors: string[] = [];
+  const tasks: Array<Promise<StashSceneMatch[]>> = [];
+
+  if (provider?.enabled && provider.endpoint.trim()) {
+    const label = provider.name || "Stash-Box";
+    queriedProviders.push(label);
+    tasks.push(
+      findScenesByFingerprint(provider, { hash, algorithm }).catch((err: any) => {
+        errors.push(`${label}: ${err?.message || String(err)}`);
+        return [];
+      })
+    );
+  }
+
+  if (thePornDbApiKey?.trim()) {
+    queriedProviders.push("ThePornDB");
+    tasks.push(
+      findThePornDbScenesByHash(hash, thePornDbApiKey, algorithm).catch((err: any) => {
+        errors.push(`ThePornDB: ${err?.message || String(err)}`);
+        return [];
+      })
+    );
+  }
+
+  const results = await Promise.all(tasks);
+  const seen = new Set<string>();
+  const matches: StashSceneMatch[] = [];
+  for (const group of results) {
+    for (const m of group) {
+      const k = `${m.source}:${m.id}`;
+      if (!seen.has(k)) {
+        seen.add(k);
+        matches.push(m);
+      }
+    }
+  }
+
+  return { matches, queriedProviders, errors };
 }
 
 export async function searchScenesByFragment(

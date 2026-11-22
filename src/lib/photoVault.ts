@@ -222,6 +222,43 @@ export async function loadAndDecryptVaultPhoto(
       }
     }
 
+    const isEncryptedContainerEarly =
+      rawPath?.endsWith(".enc") ||
+      photo.remotePath?.endsWith(".enc") ||
+      photo.remotePreviewPath?.endsWith(".enc") ||
+      photo.remoteOriginalPath?.endsWith(".enc");
+
+    if (
+      !isEncryptedContainerEarly &&
+      !photo.isAdult &&
+      photo.catboxUrl &&
+      photo.catboxUrl.startsWith("https://files.catbox.moe/")
+    ) {
+      try {
+        const { httpFetch } = await import("./httpFetch");
+        const resp = await httpFetch(photo.catboxUrl);
+        if (resp.ok) {
+          const buf = await resp.arrayBuffer();
+          const ext = photo.catboxUrl.split(".").pop()?.toLowerCase() || "jpg";
+          const mimeType =
+            ext === "png"
+              ? "image/png"
+              : ext === "webp"
+              ? "image/webp"
+              : ext === "gif"
+              ? "image/gif"
+              : "image/jpeg";
+          const blob = new Blob([buf], { type: mimeType });
+          const objectUrl = URL.createObjectURL(blob);
+          decryptedUrlCache.set(cacheKey, { url: objectUrl, lastAccessed: Date.now() });
+          evictOldestDecryptedUrls();
+          return objectUrl;
+        }
+      } catch (catboxErr) {
+        console.warn("Catbox blob fetch failed, falling back to rclone remote:", catboxErr);
+      }
+    }
+
     const normalized = normalizeRemotePath(rawPath);
 
     // 2. Hardware-accelerated native Rust decryption and instant Blob URL

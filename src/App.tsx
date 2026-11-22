@@ -33,6 +33,7 @@ import { PlaylistDetailPage } from "./pages/playlist/PlaylistDetailPage";
 import { PhotosPage } from "./pages/photos/PhotosPage";
 import { CloudExplorerPage } from "./pages/explorer/CloudExplorerPage";
 import { DirectPlayPage } from "./pages/DirectPlayPage";
+import { CommandPalette } from "./components/layout/CommandPalette";
 import { ToastContainer } from "./components/ToastContainer";
 import { MusicSkinShell } from "./components/music/MusicSkinShell";
 import { useMusicSkinWindow } from "./lib/useMusicSkinWindow";
@@ -224,6 +225,7 @@ export default function App() {
           />
         )}
       </AnimatePresence>
+      <CommandPalette />
       <ToastContainer />
     </ErrorBoundary>
   );

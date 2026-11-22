@@ -176,6 +176,7 @@ pub async fn rclone_mkdir(
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("rclone error: {}", stderr.trim()));
     }
+    crate::commands::rclone::spawn_best_effort_vfs_refresh(&app, &remote_path);
     Ok(())
 }
 
@@ -214,6 +215,7 @@ pub async fn rclone_upload_file(
         crate::log_error!(&app, "sync", "{} failed for {}: {}", subcmd, remote_path, stderr.trim());
         return Err(format!("rclone error: {}", stderr.trim()));
     }
+    crate::commands::rclone::spawn_best_effort_vfs_refresh(&app, &remote_path);
     Ok(())
 }
 
@@ -277,6 +279,7 @@ pub async fn rclone_upload_bytes(
         crate::log_error!(&app, "sync", "upload failed for {}: {}", remote_path, stderr.trim());
         return Err(format!("rclone error: {}", stderr.trim()));
     }
+    crate::commands::rclone::spawn_best_effort_vfs_refresh(&app, &remote_path);
 
     Ok(size)
 }

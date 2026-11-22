@@ -72,6 +72,7 @@ pub async fn scan_library_files(
     let rclone_settings = crate::commands::store::get_rclone_settings_sync(&app);
     let tps_limit_str = rclone_settings.clean_tps_limit().to_string();
     let tps_burst_str = rclone_settings.clean_tps_limit_burst().to_string();
+    let trash_dir_name = rclone_settings.clean_soft_delete_trash_dir().to_string();
 
     // A recursive lsjson over a large remote can take minutes — keep it off
     // the async runtime so other commands stay responsive.
@@ -84,6 +85,10 @@ pub async fn scan_library_files(
         "--recursive",
         "--no-modtime",
         "--files-only",
+        "--exclude",
+        "/.rcloneflix_trash/**",
+        "--exclude",
+        &format!("/{}/**", trash_dir_name),
         "--tpslimit",
         &tps_limit_str,
         "--tpslimit-burst",
@@ -141,6 +146,13 @@ pub async fn scan_library_files(
 
     for item in &items {
         if item.is_dir { continue; }
+        if item
+            .path
+            .split(['/', '\\'])
+            .any(|seg| seg == ".rcloneflix_trash" || seg == trash_dir_name)
+        {
+            continue;
+        }
 
         // Filter extensions based on library type
         let ext = item.name.rsplit('.').next().unwrap_or("").to_lowercase();

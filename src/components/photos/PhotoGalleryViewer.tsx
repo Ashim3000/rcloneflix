@@ -3,15 +3,17 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, RotateCcw,
   Info, ExternalLink, ShieldCheck, HardDrive, Loader2, Download,
-  Sparkles, Layers, LayoutGrid
+  Sparkles, Layers, LayoutGrid, CloudUpload, CheckCircle2
 } from "lucide-react";
 import { useAppStore, type PhotoGallery, type GalleryPhoto } from "../../store/appStore";
+import { useToastStore } from "../../store/toastStore";
 import {
   loadAndDecryptVaultPhoto,
   prefetchVaultPhoto,
   downloadDecryptedPhoto,
   batchPreparePhotos,
 } from "../../lib/photoVault";
+import { isPhotoEligibleForCatbox, offloadPhotoToCatbox } from "../../lib/catboxOffload";
 import { getSessionPin, PUBLIC_VAULT_KEY } from "../../lib/pin";
 
 type Props = {
@@ -144,8 +146,10 @@ function GridTile({
 }
 
 export function PhotoGalleryViewer({ gallery, initialIndex = 0, onClose }: Props) {
-  const { rcloneConfigPath, localStorageCapMb } = useAppStore();
+  const { rcloneConfigPath, localStorageCapMb, catboxConfig } = useAppStore();
+  const addToast = useToastStore((s) => s.addToast);
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
+  const [catboxBusy, setCatboxBusy] = useState(false);
   // Default = grid. "lightbox" only if the user explicitly chose it via the toggle.
   const [mode, setMode] = useState<"grid" | "lightbox">(() => {
     try {
@@ -480,6 +484,45 @@ export function PhotoGalleryViewer({ gallery, initialIndex = 0, onClose }: Props
           >
             <Download size={18} />
           </button>
+
+          {catboxConfig?.enabled &&
+            typeof window !== "undefined" &&
+            !(window as any).AndroidBridge &&
+            currentPhoto &&
+            isPhotoEligibleForCatbox(gallery, currentPhoto) && (
+              currentPhoto.catboxUrl ? (
+                <a
+                  href={currentPhoto.catboxUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20 transition-all"
+                  title={`Offloaded to Catbox: ${currentPhoto.catboxUrl}`}
+                >
+                  <CheckCircle2 size={18} />
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  disabled={catboxBusy}
+                  onClick={async () => {
+                    if (!currentPhoto) return;
+                    setCatboxBusy(true);
+                    try {
+                      const url = await offloadPhotoToCatbox(gallery.id, currentPhoto);
+                      addToast(`Offloaded photo to Catbox: ${url}`, "success");
+                    } catch (err: any) {
+                      addToast(`Catbox offload failed: ${err?.message || err}`, "error");
+                    } finally {
+                      setCatboxBusy(false);
+                    }
+                  }}
+                  className="p-2 rounded-xl bg-panel border border-border text-subtle hover:text-accent hover:border-accent/40 transition-all disabled:opacity-50"
+                  title="Offload unencrypted photo to Catbox.moe"
+                >
+                  {catboxBusy ? <Loader2 size={18} className="animate-spin" /> : <CloudUpload size={18} />}
+                </button>
+              )
+            )}
         </div>
       </div>
 

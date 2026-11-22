@@ -15,6 +15,7 @@ import { ScanBar } from "../components/common/ScanBar";
 import { scanAllLibraries } from "../lib/scanner";
 import { refreshSimklDiscovery } from "../lib/simkl";
 import { annotateWithLibraryMatch, resolveDiscoveryCardNavigation } from "../lib/discoveryMatching";
+import { OvernightDigestBanner } from "../components/library/OvernightDigestBanner";
 
 export function HomePage() {
   const navigate = useNavigate();
@@ -164,6 +165,8 @@ export function HomePage() {
             </p>
           </motion.div>
         )}
+
+        <OvernightDigestBanner />
 
         {/* Recommended Titles Shelf (Always Topmost) */}
         {recommendedItems.length > 0 && (

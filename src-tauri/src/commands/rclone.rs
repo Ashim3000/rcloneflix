@@ -526,7 +526,11 @@ pub async fn rclone_rename_file(
     from_path: String,
     to_path: String,
 ) -> Result<(), String> {
-    if from_path.starts_with("shared_") || to_path.starts_with("shared_") {
+    if from_path.starts_with("shared_")
+        || to_path.starts_with("shared_")
+        || path_uses_shared_remote(&config_path, &from_path)?
+        || path_uses_shared_remote(&config_path, &to_path)?
+    {
         return Err("Permission denied: rename/move operations are forbidden on shared access pass remotes".into());
     }
 
@@ -556,13 +560,13 @@ pub async fn rclone_rename_file(
         .map_err(|e| format!("Failed to run rclone moveto: {}", e))?;
 
     if !output.status.success() {
-        // Server-side ops across different providers fail hard inside rclone
-        // (e.g. WebDAV "409 Conflict: destination node is not found") instead of
-        // falling back — retry once as a streamed move.
         let mut retry = tokio_command(&rclone);
         retry.arg("moveto");
         if let Some(cfg) = crate::commands::rclone_sync::resolve_config_arg(&config_path) {
             retry.args(["--config", &cfg]);
+        }
+        if let Some(bw) = rclone_settings.clean_bw_limit() {
+            retry.args(["--bwlimit", &bw]);
         }
         retry.args([
             "--tpslimit",
@@ -581,6 +585,7 @@ pub async fn rclone_rename_file(
             return Err(format!("rclone moveto error: {}", stderr.trim()));
         }
     }
+    spawn_best_effort_vfs_refresh_pair(&app, &from_path, &to_path);
     Ok(())
 }
 
@@ -592,7 +597,7 @@ pub async fn rclone_copy_file(
     from_path: String,
     to_path: String,
 ) -> Result<(), String> {
-    if to_path.starts_with("shared_") {
+    if to_path.starts_with("shared_") || path_uses_shared_remote(&config_path, &to_path)? {
         return Err("Permission denied: write operations are forbidden on shared access pass remotes".into());
     }
 
@@ -600,11 +605,15 @@ pub async fn rclone_copy_file(
     let rclone_settings = crate::commands::store::get_rclone_settings_sync(&app);
     let tps_limit_str = rclone_settings.clean_tps_limit().to_string();
     let tps_burst_str = rclone_settings.clean_tps_limit_burst().to_string();
+    let bw_opt = rclone_settings.clean_bw_limit();
 
     let mut cmd = tokio_command(&rclone);
     cmd.arg("copyto");
     if let Some(cfg) = crate::commands::rclone_sync::resolve_config_arg(&config_path) {
         cmd.args(["--config", &cfg]);
+    }
+    if let Some(ref bw) = bw_opt {
+        cmd.args(["--bwlimit", bw]);
     }
     cmd.args([
         "--server-side-across-configs",
@@ -622,13 +631,13 @@ pub async fn rclone_copy_file(
         .map_err(|e| format!("Failed to run rclone copyto: {}", e))?;
 
     if !output.status.success() {
-        // Server-side ops across different providers fail hard inside rclone
-        // (e.g. WebDAV "409 Conflict: destination node is not found") instead of
-        // falling back — retry once as a streamed copy.
         let mut retry = tokio_command(&rclone);
         retry.arg("copyto");
         if let Some(cfg) = crate::commands::rclone_sync::resolve_config_arg(&config_path) {
             retry.args(["--config", &cfg]);
+        }
+        if let Some(ref bw) = bw_opt {
+            retry.args(["--bwlimit", bw]);
         }
         retry.args([
             "--tpslimit",
@@ -647,10 +656,13 @@ pub async fn rclone_copy_file(
             return Err(format!("rclone copyto error: {}", stderr.trim()));
         }
     }
+    spawn_best_effort_vfs_refresh(&app, &to_path);
     Ok(())
 }
 
-/// Delete a file or directory on an rclone remote (deletefile for files, purge for folders)
+/// Delete a file or directory on an rclone remote.
+/// When `softDeleteEnabled` is active in RcloneSettings (and the first path segment is not the trash folder),
+/// moves the item into `<remote>:<trash_dir>/<unix_epoch_secs>/<rel_path>` via `rclone_rename_file`.
 #[tauri::command]
 pub async fn rclone_delete_item(
     app: AppHandle,
@@ -658,7 +670,7 @@ pub async fn rclone_delete_item(
     remote_path: String,
     is_dir: bool,
 ) -> Result<(), String> {
-    if remote_path.starts_with("shared_") {
+    if remote_path.starts_with("shared_") || path_uses_shared_remote(&config_path, &remote_path)? {
         return Err("Permission denied: delete operations are forbidden on shared access pass remotes".into());
     }
 
@@ -666,6 +678,24 @@ pub async fn rclone_delete_item(
     let rclone_settings = crate::commands::store::get_rclone_settings_sync(&app);
     let tps_limit_str = rclone_settings.clean_tps_limit().to_string();
     let tps_burst_str = rclone_settings.clean_tps_limit_burst().to_string();
+    let trash_dir = rclone_settings.clean_soft_delete_trash_dir();
+
+    if rclone_settings.soft_delete_enabled {
+        if let Some((remote_prefix, rel_path)) = remote_path.split_once(':') {
+            if remote_prefix.trim().len() > 1 {
+                let clean_rel = rel_path.trim_start_matches(['/', '\\']);
+                let first_seg = clean_rel.split(['/', '\\']).next().unwrap_or("");
+                if !clean_rel.is_empty() && first_seg != trash_dir && first_seg != ".rcloneflix_trash" {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let trash_dest = format!("{}:{}/{}/{}", remote_prefix.trim(), trash_dir, ts, clean_rel);
+                    return rclone_rename_file(app, config_path, remote_path, trash_dest).await;
+                }
+            }
+        }
+    }
 
     let mut cmd = tokio_command(&rclone);
     if is_dir {
@@ -694,6 +724,7 @@ pub async fn rclone_delete_item(
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("rclone delete error: {}", stderr.trim()));
     }
+    spawn_best_effort_vfs_refresh(&app, &remote_path);
     Ok(())
 }
 
@@ -1264,50 +1295,86 @@ pub async fn mount_remote(
         std::fs::create_dir_all(&mount_dir)
             .map_err(|e| format!("Failed creating mount directory: {}", e))?;
 
+        let (has_union, has_shared) = inspect_remote_chain(&config_path, &clean_remote)?;
+        if has_union {
+            return Err(
+                "FUSE mounting 'union' remotes (or remotes wrapping a union) is disabled to prevent unmount hangs. Browse this pool in Cloud Explorer instead."
+                    .to_string(),
+            );
+        }
+
         let rclone = crate::commands::player::rclone_binary(&app);
         let cfg_opt = crate::commands::rclone_sync::resolve_config_arg(&config_path);
+        let rc_user = "rcloneflix_vfs".to_string();
+        let rc_pass = generate_random_hex_secret();
 
-        let mut cmd = std::process::Command::new(&rclone);
-        if let Some(ref cfg) = cfg_opt {
-            cmd.args(["--config", cfg]);
-        }
-        cmd.args([
-            "mount",
-            &format!("{}:", clean_remote),
-            &mount_dir.to_string_lossy(),
-            "--vfs-cache-mode",
-            "full",
-            "--vfs-cache-max-size",
-            "10G",
-            "--vfs-cache-max-age",
-            "24h",
-            "--dir-cache-time",
-            "5m",
-            "--poll-interval",
-            "15s",
-            "--umask",
-            "002",
-            "--daemon",
-        ]);
+        let mut last_err = String::new();
+        let mut bound_port: u16 = 0;
 
-        // Enforce guest pass read-only security boundary
-        if clean_remote.starts_with("shared_") {
-            cmd.arg("--read-only");
+        for _attempt in 0..2 {
+            let candidate_port = portpicker::pick_unused_port().unwrap_or(0);
+            let mut cmd = std::process::Command::new(&rclone);
+            if let Some(ref cfg) = cfg_opt {
+                cmd.args(["--config", cfg]);
+            }
+            cmd.args([
+                "mount",
+                &format!("{}:", clean_remote),
+                &mount_dir.to_string_lossy(),
+                "--vfs-cache-mode",
+                "full",
+                "--vfs-cache-max-size",
+                "10G",
+                "--vfs-cache-max-age",
+                "24h",
+                "--dir-cache-time",
+                "5m",
+                "--poll-interval",
+                "15s",
+                "--umask",
+                "002",
+                "--daemon",
+            ]);
+
+            if candidate_port > 0 {
+                cmd.args([
+                    "--rc",
+                    "--rc-addr",
+                    &format!("127.0.0.1:{}", candidate_port),
+                ]);
+                cmd.env("RCLONE_RC_USER", &rc_user)
+                    .env("RCLONE_RC_PASS", &rc_pass);
+            }
+
+            if clean_remote.starts_with("shared_") || has_shared {
+                cmd.arg("--read-only");
+            }
+
+            let out = cmd.output().map_err(|e| format!("Failed to launch rclone mount: {}", e))?;
+            if out.status.success() {
+                bound_port = candidate_port;
+                last_err.clear();
+                break;
+            }
+            last_err = String::from_utf8_lossy(&out.stderr).to_string();
         }
 
-        let out = cmd.output().map_err(|e| format!("Failed to launch rclone mount: {}", e))?;
-        if !out.status.success() {
-            return Err(format!(
-                "rclone mount failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            ));
+        if !last_err.is_empty() {
+            return Err(format!("rclone mount failed: {}", last_err));
         }
+
+        if bound_port > 0 {
+            save_mount_rc_entry(&app, &clean_remote, bound_port, &rc_user, &rc_pass);
+        }
+
         Ok(mount_dir.to_string_lossy().to_string())
     }
 }
 
 #[tauri::command]
-pub fn unmount_remote(remote_name: String) -> Result<(), String> {
+pub fn unmount_remote(app: AppHandle, remote_name: String) -> Result<(), String> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = (&app, &remote_name);
     #[cfg(target_os = "linux")]
     {
         let clean_remote = validate_remote_name(&remote_name)?;
@@ -1315,6 +1382,7 @@ pub fn unmount_remote(remote_name: String) -> Result<(), String> {
             .into_iter()
             .find(|m| m.name.eq_ignore_ascii_case(&clean_remote) && m.managed)
         else {
+            remove_mount_rc_entry(&app, &clean_remote);
             if let Some(ext) = read_rclone_mounts()
                 .into_iter()
                 .find(|m| m.name.eq_ignore_ascii_case(&clean_remote))
@@ -1338,8 +1406,863 @@ pub fn unmount_remote(remote_name: String) -> Result<(), String> {
         if !status.success() {
             return Err(format!("Could not unmount {}", m.mount_point));
         }
+        remove_mount_rc_entry(&app, &clean_remote);
     }
     Ok(())
+}
+
+// ─── Native Rclone Suite Extensions ──────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct MountRcEntry {
+    port: u16,
+    user: String,
+    pass: String,
+}
+
+static MOUNT_RC_FILE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+fn mount_rc_mutex() -> &'static std::sync::Mutex<()> {
+    MOUNT_RC_FILE_LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+fn generate_random_hex_secret() -> String {
+    use aes_gcm::aead::{rand_core::RngCore, OsRng};
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn mount_rc_registry_file_path(app: &AppHandle) -> PathBuf {
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("rcloneflix"));
+    let _ = std::fs::create_dir_all(&base);
+    base.join("mount_rc_registry.json")
+}
+
+fn load_mount_rc_map_unlocked(path: &Path) -> std::collections::HashMap<String, MountRcEntry> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return std::collections::HashMap::new();
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn write_mount_rc_map_unlocked(
+    path: &Path,
+    map: &std::collections::HashMap<String, MountRcEntry>,
+) {
+    use std::io::Write;
+    let Ok(json) = serde_json::to_string(map) else {
+        return;
+    };
+    let tmp_path = path.with_extension("json.tmp");
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    if let Ok(mut file) = opts.open(&tmp_path) {
+        if file.write_all(json.as_bytes()).is_ok() && file.sync_all().is_ok() {
+            let _ = std::fs::rename(&tmp_path, path);
+        }
+    }
+}
+
+fn save_mount_rc_entry(app: &AppHandle, remote_name: &str, port: u16, user: &str, pass: &str) {
+    let Ok(_guard) = mount_rc_mutex().lock() else {
+        return;
+    };
+    let path = mount_rc_registry_file_path(app);
+    let mut map = load_mount_rc_map_unlocked(&path);
+    map.insert(
+        remote_name.trim().trim_end_matches(':').to_lowercase(),
+        MountRcEntry {
+            port,
+            user: user.to_string(),
+            pass: pass.to_string(),
+        },
+    );
+    write_mount_rc_map_unlocked(&path, &map);
+}
+
+fn remove_mount_rc_entry(app: &AppHandle, remote_name: &str) {
+    let Ok(_guard) = mount_rc_mutex().lock() else {
+        return;
+    };
+    let path = mount_rc_registry_file_path(app);
+    let mut map = load_mount_rc_map_unlocked(&path);
+    if map
+        .remove(&remote_name.trim().trim_end_matches(':').to_lowercase())
+        .is_some()
+    {
+        write_mount_rc_map_unlocked(&path, &map);
+    }
+}
+
+fn parse_vfs_refresh_target(remote_or_path: &str) -> Option<(String, Option<String>)> {
+    let (remote_prefix, rel) = remote_or_path.split_once(':')?;
+    let clean_remote = remote_prefix.trim();
+    if clean_remote.len() <= 1 || clean_remote.contains('/') || clean_remote.contains('\\') {
+        return None;
+    }
+    let clean_rel = rel.trim_start_matches(['/', '\\']);
+    let parent_dir = clean_rel
+        .rsplit_once('/')
+        .map(|(dir, _)| dir.to_string())
+        .filter(|s| !s.is_empty());
+    Some((clean_remote.to_string(), parent_dir))
+}
+
+pub(crate) fn spawn_best_effort_vfs_refresh(app: &AppHandle, remote_or_path: &str) {
+    let Some((remote, parent_dir)) = parse_vfs_refresh_target(remote_or_path) else {
+        return;
+    };
+    let app_clone = app.clone();
+    tokio::spawn(async move {
+        let _ = rclone_vfs_refresh(app_clone, remote, parent_dir).await;
+    });
+}
+
+pub(crate) fn spawn_best_effort_vfs_refresh_pair(
+    app: &AppHandle,
+    first_path: &str,
+    second_path: &str,
+) {
+    let t1 = parse_vfs_refresh_target(first_path);
+    let t2 = parse_vfs_refresh_target(second_path);
+    if let Some((r1, p1)) = t1.clone() {
+        let app_clone = app.clone();
+        tokio::spawn(async move {
+            let _ = rclone_vfs_refresh(app_clone, r1, p1).await;
+        });
+    }
+    if let Some((r2, p2)) = t2 {
+        let same_as_first = t1
+            .as_ref()
+            .map(|(r1, p1)| r1.eq_ignore_ascii_case(&r2) && *p1 == p2)
+            .unwrap_or(false);
+        if !same_as_first {
+            let app_clone = app.clone();
+            tokio::spawn(async move {
+                let _ = rclone_vfs_refresh(app_clone, r2, p2).await;
+            });
+        }
+    }
+}
+
+fn inspect_remote_chain(config_path: &str, remote_or_path: &str) -> Result<(bool, bool), String> {
+    let root_name = remote_or_path
+        .trim()
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if root_name.is_empty() {
+        return Err("Remote name is empty.".into());
+    }
+    if root_name.to_lowercase().starts_with("shared_") {
+        return Ok((false, true));
+    }
+
+    let resolved_cfg = crate::commands::rclone_sync::resolve_config_arg(config_path)
+        .unwrap_or_else(|| config_path.to_string());
+    let cfg_path = Path::new(&resolved_cfg);
+    if !cfg_path.exists() {
+        return Err(format!(
+            "Cannot verify remote security policy: rclone config not found at '{}'.",
+            resolved_cfg
+        ));
+    }
+    let content = std::fs::read_to_string(cfg_path).map_err(|e| {
+        format!(
+            "Cannot verify remote security policy: failed reading rclone.conf ({}).",
+            e
+        )
+    })?;
+    if content.contains("RCLONE_ENCRYPT_V0:") {
+        return Err(
+            "Cannot verify remote security policy: encrypted rclone.conf is not supported for this operation."
+                .into(),
+        );
+    }
+
+    let mut sections: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, String>,
+    > = std::collections::HashMap::new();
+    let mut cur_sec: Option<String> = None;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            let s = t[1..t.len() - 1].trim().to_lowercase();
+            cur_sec = Some(s.clone());
+            sections.entry(s).or_default();
+        } else if let (Some(ref sec), Some((k, v))) = (&cur_sec, t.split_once('=')) {
+            if let Some(map) = sections.get_mut(sec) {
+                map.insert(k.trim().to_lowercase(), v.trim().to_string());
+            }
+        }
+    }
+
+    let root_lower = root_name.to_lowercase();
+    if !sections.contains_key(&root_lower) {
+        return Err(format!(
+            "Remote '{}' was not found in rclone.conf.",
+            root_name
+        ));
+    }
+
+    let mut has_union = false;
+    let mut has_shared = false;
+    let mut stack = vec![(root_lower, 0usize)];
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some((cur, depth)) = stack.pop() {
+        if depth > 8 {
+            return Err("Remote wrapper chain exceeds maximum depth (8).".into());
+        }
+        if !visited.insert(cur.clone()) {
+            continue;
+        }
+        if cur.starts_with("shared_") {
+            has_shared = true;
+        }
+        let Some(props) = sections.get(&cur) else {
+            continue;
+        };
+        if let Some(rtype) = props.get("type") {
+            if rtype.eq_ignore_ascii_case("union") {
+                has_union = true;
+            }
+        }
+        if let Some(target) = props.get("remote") {
+            let next = target
+                .trim_matches('"')
+                .split(':')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            if !next.is_empty() && next.len() > 1 {
+                stack.push((next, depth + 1));
+            }
+        }
+        if let Some(upstreams) = props.get("upstreams") {
+            for token in upstreams.split_whitespace() {
+                let cleaned = token.trim_matches('"');
+                let candidate = cleaned.rsplit_once('=').map(|(_, r)| r).unwrap_or(cleaned);
+                let next = candidate.split(':').next().unwrap_or("").trim().to_lowercase();
+                if !next.is_empty() && next.len() > 1 {
+                    stack.push((next, depth + 1));
+                }
+            }
+        }
+    }
+
+    Ok((has_union, has_shared))
+}
+
+fn path_uses_shared_remote(config_path: &str, path: &str) -> Result<bool, String> {
+    let trimmed = path.trim();
+    if trimmed.to_lowercase().starts_with("shared_") {
+        return Ok(true);
+    }
+    if let Some((prefix, _)) = trimmed.split_once(':') {
+        let clean_prefix = prefix.trim();
+        if clean_prefix.len() > 1
+            && !clean_prefix.contains('/')
+            && !clean_prefix.contains('\\')
+        {
+            let (_, shared) = inspect_remote_chain(config_path, clean_prefix)?;
+            return Ok(shared);
+        }
+    }
+    Ok(false)
+}
+
+fn validate_new_virtual_remote_name(config_path: &str, remote_name: &str) -> Result<String, String> {
+    let clean = remote_name.trim();
+    if clean.is_empty() || clean.to_lowercase().starts_with("shared_") {
+        return Err("Remote name cannot be empty or start with 'shared_'.".into());
+    }
+    if !clean
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err("Remote name may only contain letters, numbers, '_', and '-'.".into());
+    }
+    let existing = parse_rclone_config(config_path.to_string())?;
+    if existing.iter().any(|r| r.name.eq_ignore_ascii_case(clean)) {
+        return Err(format!(
+            "A remote named '{}' already exists. Delete or rename it first.",
+            clean
+        ));
+    }
+    Ok(clean.to_string())
+}
+
+fn quote_rclone_upstream_token(token: &str) -> String {
+    let escaped = token.replace('"', "\\\"");
+    if escaped.chars().any(|c| c.is_whitespace()) {
+        format!("\"{}\"", escaped)
+    } else {
+        escaped
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RcloneQuota {
+    pub supported: bool,
+    pub total: Option<u64>,
+    pub used: Option<u64>,
+    pub free: Option<u64>,
+    pub trashed: Option<u64>,
+}
+
+/// 3.1 `rclone about <remote>: --json`
+#[tauri::command]
+pub async fn rclone_about(
+    app: AppHandle,
+    config_path: String,
+    remote_name: String,
+) -> Result<RcloneQuota, String> {
+    let clean = remote_name.trim().trim_end_matches(':');
+    if clean.is_empty() || clean.starts_with('-') {
+        return Err("Valid remote name is required".into());
+    }
+    let rclone = rclone_binary(&app);
+    let mut cmd = tokio_command(&rclone);
+    cmd.args(["about", &format!("{}:", clean), "--json"]);
+    if let Some(cfg) = crate::commands::rclone_sync::resolve_config_arg(&config_path) {
+        cmd.args(["--config", &cfg]);
+    }
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run rclone about: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let lower = stderr.to_lowercase();
+        if lower.contains("doesn't support about")
+            || lower.contains("not supported")
+            || lower.contains("about call is not supported")
+        {
+            return Ok(RcloneQuota {
+                supported: false,
+                total: None,
+                used: None,
+                free: None,
+                trashed: None,
+            });
+        }
+        return Err(format!("rclone about failed: {}", stderr.trim()));
+    }
+    let val: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_default();
+    Ok(RcloneQuota {
+        supported: true,
+        total: val.get("total").and_then(|v| v.as_u64()),
+        used: val.get("used").and_then(|v| v.as_u64()),
+        free: val.get("free").and_then(|v| v.as_u64()),
+        trashed: val.get("trashed").and_then(|v| v.as_u64()),
+    })
+}
+
+/// 3.2a `rclone config create <name> union ...`
+#[tauri::command]
+pub async fn rclone_create_union_remote(
+    app: AppHandle,
+    config_path: String,
+    remote_name: String,
+    upstreams: Vec<String>,
+    action_policy: String,
+    create_policy: String,
+) -> Result<Vec<RcloneRemote>, String> {
+    let clean_name = validate_new_virtual_remote_name(&config_path, &remote_name)?;
+    if upstreams.len() < 2 {
+        return Err("A union remote requires at least 2 upstreams.".into());
+    }
+    const ALLOWED_ACTION: &[&str] = &["epall", "all", "epff"];
+    const ALLOWED_CREATE: &[&str] = &["epmfs", "mfs", "lus", "epall"];
+    if !ALLOWED_ACTION.contains(&action_policy.as_str()) {
+        return Err(format!("Unsupported action_policy '{}'", action_policy));
+    }
+    if !ALLOWED_CREATE.contains(&create_policy.as_str()) {
+        return Err(format!("Unsupported create_policy '{}'", create_policy));
+    }
+
+    let mut sanitized_upstreams = Vec::with_capacity(upstreams.len());
+    for u in upstreams {
+        let trimmed = u.trim().trim_matches('"');
+        if trimmed.is_empty() {
+            continue;
+        }
+        let check_target = if trimmed.contains(':') {
+            trimmed.to_string()
+        } else {
+            format!("{}:", trimmed)
+        };
+        let is_shared = path_uses_shared_remote(&config_path, &check_target)?;
+        let token = if is_shared && !trimmed.ends_with(":ro") {
+            if trimmed.contains(':') {
+                format!("{}:ro", trimmed)
+            } else {
+                format!("{}::ro", trimmed)
+            }
+        } else {
+            check_target
+        };
+        sanitized_upstreams.push(quote_rclone_upstream_token(&token));
+    }
+
+    if sanitized_upstreams.len() < 2 {
+        return Err("A union remote requires at least 2 non-empty upstreams.".into());
+    }
+
+    let rclone = rclone_binary(&app);
+    let mut cmd = tokio_command(&rclone);
+    if let Some(cfg) = crate::commands::rclone_sync::resolve_config_arg(&config_path) {
+        cmd.args(["--config", &cfg]);
+    }
+    cmd.args([
+        "config",
+        "create",
+        &clean_name,
+        "union",
+        "upstreams",
+        &sanitized_upstreams.join(" "),
+        "action_policy",
+        &action_policy,
+        "create_policy",
+        &create_policy,
+        "--non-interactive",
+    ]);
+
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to create union remote: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "rclone config create union failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    parse_rclone_config(config_path)
+}
+
+/// 3.2b `rclone config create <name> combine ...`
+#[tauri::command]
+pub async fn rclone_create_combine_remote(
+    app: AppHandle,
+    config_path: String,
+    remote_name: String,
+    upstreams: Vec<(String, String)>,
+) -> Result<Vec<RcloneRemote>, String> {
+    let clean_name = validate_new_virtual_remote_name(&config_path, &remote_name)?;
+    if upstreams.is_empty() {
+        return Err("At least one upstream mapping is required.".into());
+    }
+    let mut pairs = Vec::with_capacity(upstreams.len());
+    for (alias, target) in upstreams {
+        let a = alias.trim().trim_matches('"');
+        let t = target.trim().trim_matches('"');
+        if a.is_empty() || t.is_empty() {
+            continue;
+        }
+        if a.contains('=') || a.contains('/') || a.contains('\\') {
+            return Err(format!("Invalid combine folder alias '{}'", a));
+        }
+        let formatted_target = if t.contains(':') {
+            t.to_string()
+        } else {
+            format!("{}:", t)
+        };
+        if path_uses_shared_remote(&config_path, &formatted_target)? {
+            return Err("Guest pass (shared_) remotes cannot be added to a combine remote.".into());
+        }
+        pairs.push(quote_rclone_upstream_token(&format!("{}={}", a, formatted_target)));
+    }
+
+    if pairs.is_empty() {
+        return Err("At least one valid upstream mapping is required.".into());
+    }
+
+    let rclone = rclone_binary(&app);
+    let mut cmd = tokio_command(&rclone);
+    if let Some(cfg) = crate::commands::rclone_sync::resolve_config_arg(&config_path) {
+        cmd.args(["--config", &cfg]);
+    }
+    cmd.args([
+        "config",
+        "create",
+        &clean_name,
+        "combine",
+        "upstreams",
+        &pairs.join(" "),
+        "--non-interactive",
+    ]);
+
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to create combine remote: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "rclone config create combine failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    parse_rclone_config(config_path)
+}
+
+/// 3.3 `rclone_vfs_refresh` targeting the persisted per-mount `--rc` endpoint (2s fast timeout).
+#[tauri::command]
+pub async fn rclone_vfs_refresh(
+    app: AppHandle,
+    remote_name: String,
+    dir_path: Option<String>,
+) -> Result<bool, String> {
+    let key = remote_name.trim().trim_end_matches(':').to_lowercase();
+
+    #[cfg(target_os = "linux")]
+    {
+        let is_mounted = read_rclone_mounts()
+            .into_iter()
+            .any(|m| m.managed && m.name.eq_ignore_ascii_case(&key));
+        if !is_mounted {
+            remove_mount_rc_entry(&app, &key);
+            return Ok(false);
+        }
+    }
+
+    let entry_opt = {
+        let Ok(_guard) = mount_rc_mutex().lock() else {
+            return Ok(false);
+        };
+        let path = mount_rc_registry_file_path(&app);
+        load_mount_rc_map_unlocked(&path).get(&key).cloned()
+    };
+    let Some(entry) = entry_opt else {
+        return Ok(false);
+    };
+    let mut body = serde_json::json!({ "recursive": "false" });
+    if let Some(d) = dir_path.filter(|s| !s.trim().is_empty()) {
+        body["dir"] = serde_json::Value::String(d);
+    }
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("http://127.0.0.1:{}/vfs/refresh", entry.port))
+        .basic_auth(&entry.user, Some(&entry.pass))
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+        .map_err(|e| format!("VFS refresh error: {}", e))?;
+    Ok(res.status().is_success())
+}
+
+/// 3.4 `rclone bisync` checking both paths for `shared_` and leading `-`
+#[tauri::command]
+pub async fn rclone_bisync(
+    app: AppHandle,
+    config_path: String,
+    local_dir: String,
+    remote_dir: String,
+    resync: bool,
+    dry_run: bool,
+    conflict_resolve: String,
+) -> Result<String, String> {
+    let p1 = local_dir.trim();
+    let p2 = remote_dir.trim();
+    if p1.is_empty() || p2.is_empty() || p1.starts_with('-') || p2.starts_with('-') {
+        return Err("Invalid bisync path arguments.".into());
+    }
+    if path_uses_shared_remote(&config_path, p1)? || path_uses_shared_remote(&config_path, p2)? {
+        return Err("Permission denied: bisync is forbidden on shared access pass remotes.".into());
+    }
+    const ALLOWED_CONFLICT: &[&str] = &["none", "newer", "older", "larger", "smaller", "path1", "path2"];
+    if !ALLOWED_CONFLICT.contains(&conflict_resolve.as_str()) {
+        return Err(format!("Invalid conflict_resolve mode '{}'", conflict_resolve));
+    }
+
+    let rclone = rclone_binary(&app);
+    let rclone_settings = crate::commands::store::get_rclone_settings_sync(&app);
+    let tps_limit_str = rclone_settings.clean_tps_limit().to_string();
+    let tps_burst_str = rclone_settings.clean_tps_limit_burst().to_string();
+
+    let mut cmd = tokio_command(&rclone);
+    cmd.arg("bisync");
+    if let Some(cfg) = crate::commands::rclone_sync::resolve_config_arg(&config_path) {
+        cmd.args(["--config", &cfg]);
+    }
+    if let Some(bw) = rclone_settings.clean_bw_limit() {
+        cmd.args(["--bwlimit", &bw]);
+    }
+    cmd.args([
+        p1,
+        p2,
+        "--conflict-resolve",
+        &conflict_resolve,
+        "--max-delete",
+        "50",
+        "--tpslimit",
+        &tps_limit_str,
+        "--tpslimit-burst",
+        &tps_burst_str,
+    ]);
+    if resync {
+        cmd.arg("--resync");
+    }
+    if dry_run {
+        cmd.arg("--dry-run");
+    }
+
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run rclone bisync: {}", e))?;
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if !out.status.success() {
+        return Err(format!("rclone bisync failed: {}", combined.trim()));
+    }
+    if !dry_run {
+        spawn_best_effort_vfs_refresh_pair(&app, p1, p2);
+    }
+    Ok(combined.trim().to_string())
+}
+
+/// 3.5a `rclone dedupe`
+#[tauri::command]
+pub async fn rclone_dedupe(
+    app: AppHandle,
+    config_path: String,
+    remote_path: String,
+    mode: String,
+    by_hash: bool,
+    dry_run: bool,
+) -> Result<String, String> {
+    let target = remote_path.trim();
+    if target.is_empty() || target.starts_with('-') {
+        return Err("Invalid remote_path for dedupe.".into());
+    }
+    if !dry_run && path_uses_shared_remote(&config_path, target)? {
+        return Err("Permission denied: dedupe modifications are forbidden on shared access pass remotes.".into());
+    }
+    const ALLOWED_MODES: &[&str] = &["newest", "oldest", "largest", "smallest", "rename", "skip"];
+    if !ALLOWED_MODES.contains(&mode.as_str()) {
+        return Err(format!("Unsupported dedupe mode '{}'", mode));
+    }
+
+    let rclone = rclone_binary(&app);
+    let mut cmd = tokio_command(&rclone);
+    cmd.args(["dedupe", "--dedupe-mode", &mode]);
+    if by_hash {
+        cmd.arg("--by-hash");
+    }
+    if dry_run {
+        cmd.arg("--dry-run");
+    }
+    if let Some(cfg) = crate::commands::rclone_sync::resolve_config_arg(&config_path) {
+        cmd.args(["--config", &cfg]);
+    }
+    cmd.arg(target);
+
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run rclone dedupe: {}", e))?;
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if !out.status.success() {
+        return Err(format!("rclone dedupe failed: {}", combined.trim()));
+    }
+    if !dry_run {
+        spawn_best_effort_vfs_refresh(&app, target);
+    }
+    Ok(combined.trim().to_string())
+}
+
+/// 3.5b `rclone hashsum` (metadata-only — never passes `--download`)
+#[tauri::command]
+pub async fn rclone_hashsum(
+    app: AppHandle,
+    config_path: String,
+    remote_path: String,
+    hash_type: String,
+) -> Result<String, String> {
+    let target = remote_path.trim();
+    if target.is_empty() || target.starts_with('-') {
+        return Err("Invalid remote_path for hashsum.".into());
+    }
+    const ALLOWED_HASHES: &[&str] = &["md5", "sha1", "sha256", "quickxor", "crc32"];
+    let clean_hash = hash_type.trim().to_lowercase();
+    if !ALLOWED_HASHES.contains(&clean_hash.as_str()) {
+        return Err(format!("Unsupported hash type '{}'", hash_type));
+    }
+
+    let rclone = rclone_binary(&app);
+    let mut cmd = tokio_command(&rclone);
+    cmd.args(["hashsum", &clean_hash, target]);
+    if let Some(cfg) = crate::commands::rclone_sync::resolve_config_arg(&config_path) {
+        cmd.args(["--config", &cfg]);
+    }
+
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run rclone hashsum: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "rclone hashsum failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// 3.7a `rclone cleanup <remote>:` (empties cloud provider's native trash)
+#[tauri::command]
+pub async fn rclone_cleanup(
+    app: AppHandle,
+    config_path: String,
+    remote_name: String,
+) -> Result<(), String> {
+    let clean = remote_name.trim().trim_end_matches(':');
+    if clean.is_empty() || clean.starts_with('-') {
+        return Err("Invalid remote name.".into());
+    }
+    if path_uses_shared_remote(&config_path, &format!("{}:", clean))? {
+        return Err("Permission denied: cleanup is forbidden on shared access pass remotes.".into());
+    }
+    let rclone = rclone_binary(&app);
+    let mut cmd = tokio_command(&rclone);
+    cmd.args(["cleanup", &format!("{}:", clean)]);
+    if let Some(cfg) = crate::commands::rclone_sync::resolve_config_arg(&config_path) {
+        cmd.args(["--config", &cfg]);
+    }
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run rclone cleanup: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "rclone cleanup failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// 3.7b Purge RcloneFlix's soft-delete app trash folder (`<remote>:<trash_dir>`).
+#[tauri::command]
+pub async fn rclone_empty_app_trash(
+    app: AppHandle,
+    config_path: String,
+    remote_name: String,
+) -> Result<(), String> {
+    let clean = remote_name.trim().trim_end_matches(':');
+    if clean.is_empty() || clean.starts_with('-') {
+        return Err("Invalid remote name.".into());
+    }
+    if path_uses_shared_remote(&config_path, &format!("{}:", clean))? {
+        return Err("Permission denied: emptying trash is forbidden on shared access pass remotes.".into());
+    }
+    let rclone = rclone_binary(&app);
+    let rclone_settings = crate::commands::store::get_rclone_settings_sync(&app);
+    let trash_dir = rclone_settings.clean_soft_delete_trash_dir().to_string();
+    let trash_path = format!("{}:{}", clean, trash_dir);
+    let tps_limit_str = rclone_settings.clean_tps_limit().to_string();
+    let tps_burst_str = rclone_settings.clean_tps_limit_burst().to_string();
+
+    let mut cmd = tokio_command(&rclone);
+    cmd.arg("purge");
+    if let Some(cfg) = crate::commands::rclone_sync::resolve_config_arg(&config_path) {
+        cmd.args(["--config", &cfg]);
+    }
+    cmd.args([
+        "--tpslimit",
+        &tps_limit_str,
+        "--tpslimit-burst",
+        &tps_burst_str,
+        &trash_path,
+    ]);
+
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run rclone purge on app trash: {}", e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let lower = stderr.to_lowercase();
+        if lower.contains("directory not found")
+            || lower.contains("object not found")
+            || lower.contains("doesn't exist")
+        {
+            return Ok(());
+        }
+        return Err(format!("Failed to empty app trash: {}", stderr.trim()));
+    }
+    spawn_best_effort_vfs_refresh(&app, &trash_path);
+    Ok(())
+}
+
+/// 3.7c Restore an item from `<remote>:<trash_dir>/<ts>/<rel_path>` back to `<remote>:<rel_path>`.
+#[tauri::command]
+pub async fn rclone_restore_from_app_trash(
+    app: AppHandle,
+    config_path: String,
+    trash_item_path: String,
+) -> Result<String, String> {
+    if path_uses_shared_remote(&config_path, &trash_item_path)? {
+        return Err("Permission denied on shared access pass remote.".into());
+    }
+    let rclone_settings = crate::commands::store::get_rclone_settings_sync(&app);
+    let trash_dir = rclone_settings.clean_soft_delete_trash_dir();
+
+    let (remote_prefix, rel) = trash_item_path
+        .split_once(':')
+        .ok_or_else(|| "Invalid trash item path".to_string())?;
+    let clean_rel = rel.trim_start_matches(['/', '\\']);
+    let mut parts = clean_rel.splitn(3, '/');
+    let first = parts.next().unwrap_or("");
+    let _ts = parts.next().unwrap_or("");
+    let orig_rel = parts.next().unwrap_or("");
+
+    if (first != trash_dir && first != ".rcloneflix_trash") || orig_rel.is_empty() {
+        return Err("Path is not inside a timestamped RcloneFlix trash folder.".into());
+    }
+
+    let restored_path = format!("{}:{}", remote_prefix.trim(), orig_rel);
+
+    let rclone = rclone_binary(&app);
+    let mut check_cmd = tokio_command(&rclone);
+    check_cmd.args(["lsjson", "--stat", &restored_path]);
+    if let Some(cfg) = crate::commands::rclone_sync::resolve_config_arg(&config_path) {
+        check_cmd.args(["--config", &cfg]);
+    }
+    if let Ok(check_out) = check_cmd.output().await {
+        if check_out.status.success() && !check_out.stdout.is_empty() {
+            return Err(format!(
+                "Cannot restore: '{}' already exists at the destination. Rename or move the existing item first.",
+                restored_path
+            ));
+        }
+    }
+
+    rclone_rename_file(app, config_path, trash_item_path, restored_path.clone()).await?;
+    Ok(restored_path)
 }
 
 

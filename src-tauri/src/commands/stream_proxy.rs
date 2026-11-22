@@ -550,9 +550,8 @@ pub async fn get_stream_proxy_url(
 /// Authenticates against DropMB (Pingvin Share) and extracts the session JWT token from Set-Cookie or body.
 #[tauri::command]
 pub async fn dropmb_sign_in(email: String, password: String) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::builder()
-        .build()
-        .map_err(|e| e.to_string())?;
+    static DROPMB_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = DROPMB_CLIENT.get_or_init(reqwest::Client::new);
 
     let payload = serde_json::json!({
         "email": email.trim(),
@@ -619,9 +618,8 @@ pub async fn dropmb_create_share(
     expiration: String,
     token: String,
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::builder()
-        .build()
-        .map_err(|e| e.to_string())?;
+    static DROPMB_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = DROPMB_CLIENT.get_or_init(reqwest::Client::new);
 
     let payload = serde_json::json!({
         "id": id,
@@ -678,9 +676,8 @@ pub async fn dropmb_upload_chunk(
         .decode(chunk_base64.trim())
         .map_err(|e| format!("Invalid chunk base64: {}", e))?;
 
-    let client = reqwest::Client::builder()
-        .build()
-        .map_err(|e| e.to_string())?;
+    static DROPMB_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = DROPMB_CLIENT.get_or_init(reqwest::Client::new);
 
     let mut url = reqwest::Url::parse(&format!(
         "https://dropmb.com/api/shares/{}/files",
@@ -734,9 +731,8 @@ pub async fn dropmb_complete_share(
     share_id: String,
     token: String,
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::builder()
-        .build()
-        .map_err(|e| e.to_string())?;
+    static DROPMB_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = DROPMB_CLIENT.get_or_init(reqwest::Client::new);
 
     let url = format!("https://dropmb.com/api/shares/{}/complete", share_id);
     let mut req = client

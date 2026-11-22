@@ -22,6 +22,9 @@ export type MediaSourceVersion = {
   telegramMsgId?: number;
   telegramMimeType?: string;
   telegramDirectUrl?: string;
+  isAvailable?: boolean;
+  lastChecked?: number;
+  consecutiveHealthFailures?: number;
 };
 
 /**

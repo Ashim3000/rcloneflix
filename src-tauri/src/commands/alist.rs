@@ -174,8 +174,10 @@ pub async fn ensure_alist_admin_password(app: &AppHandle) -> Result<(), String> 
     Ok(())
 }
 
-/// Configure the Streamtape driver in AList's SQLite database directly
-pub fn configure_streamtape_storage(data_dir: &Path, api_login: &str, api_key: &str) -> Result<(), String> {
+/// Configure the Streamtape driver in AList's SQLite database directly.
+/// Returns `Ok(true)` if the `/streamtape` row was inserted or changed (requiring an AList restart),
+/// or `Ok(false)` if the existing row already matches.
+pub fn configure_streamtape_storage(data_dir: &Path, api_login: &str, api_key: &str) -> Result<bool, String> {
     let db_path = data_dir.join("data.db");
     if !db_path.exists() {
         return Err("AList data.db does not exist yet. Please start AList once to initialize.".to_string());
@@ -193,6 +195,20 @@ pub fn configure_streamtape_storage(data_dir: &Path, api_login: &str, api_key: &
         "range_chunk_mb": 8,
         "range_concurrency": 1,
     }).to_string();
+
+    let existing: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT addition, disabled FROM x_storages WHERE mount_path = '/streamtape' LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+
+    if let Some((cur_addition, cur_disabled)) = existing {
+        if cur_addition == addition && cur_disabled == 0 {
+            return Ok(false);
+        }
+    }
 
     conn.execute(
         "INSERT INTO x_storages (
@@ -214,7 +230,7 @@ pub fn configure_streamtape_storage(data_dir: &Path, api_login: &str, api_key: &
         [&addition],
     ).map_err(|e| format!("Failed to configure Streamtape in AList database: {}", e))?;
 
-    Ok(())
+    Ok(true)
 }
 
 fn write_streamtape_remote_to_file(path: &Path) -> Result<(), String> {
@@ -333,17 +349,16 @@ pub async fn start_alist_daemon(
     ensure_alist_config(&data_dir)?;
     ensure_alist_admin_password(&app).await?;
 
-    let mut configured = false;
+    let mut storage_changed = false;
     // If login and key are provided, configure storage
     if let (Some(login), Some(key)) = (api_login, api_key) {
         if !login.trim().is_empty() && !key.trim().is_empty() {
-            configure_streamtape_storage(&data_dir, &login, &key)?;
+            storage_changed = configure_streamtape_storage(&data_dir, &login, &key)?;
             ensure_streamtape_rclone_remote(&config_path)?;
-            configured = true;
         }
     }
 
-    if configured {
+    if storage_changed {
         let _ = stop_alist_server().await;
     }
     start_alist_server(&app).await?;

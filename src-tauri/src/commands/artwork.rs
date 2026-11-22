@@ -14,6 +14,17 @@ use crate::process_ext::tokio_command;
 
 use crate::commands::player::rclone_binary;
 
+static ARTWORK_HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn artwork_http_client() -> &'static reqwest::Client {
+    ARTWORK_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 fn cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
@@ -115,9 +126,9 @@ pub async fn cache_artwork(
         return Ok(Some(path.to_string_lossy().into_owned()));
     }
 
-    // 1. Try CDN
+    // 1. Try CDN (reusing pooled client for TLS session & HTTP/2 connection reuse)
     let mut fetched_bytes: Option<Vec<u8>> = None;
-    if let Ok(resp) = reqwest::get(&url).await {
+    if let Ok(resp) = artwork_http_client().get(&url).send().await {
         if resp.status().is_success() {
             if let Ok(b) = resp.bytes().await {
                 fetched_bytes = Some(b.to_vec());

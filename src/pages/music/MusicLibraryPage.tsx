@@ -108,6 +108,9 @@ export function MusicLibraryPage() {
     return map;
   }, [artists]);
 
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTag = searchParams.get("tag");
+
   const filteredArtists = useMemo(() => {
     let list = artists;
     if (activeTag) {
@@ -128,10 +131,7 @@ export function MusicLibraryPage() {
       }
       return a.name.localeCompare(b.name);
     });
-  }, [artists, search, sort, artistAddedAtMap]);
-
-  const [searchParams, setSearchParams] = useSearchParams();
-  const activeTag = searchParams.get("tag");
+  }, [artists, search, sort, artistAddedAtMap, activeTag]);
   const musicItems = useMemo(
     () => Object.values(mediaItems).filter((i) => i.libraryType === "music"),
     [mediaItems]
