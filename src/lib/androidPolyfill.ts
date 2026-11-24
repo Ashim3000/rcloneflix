@@ -2134,13 +2134,35 @@ if DEST.lower().startswith("telegram:"):
     stage_dir = "/tmp/stage_tg"
     os.makedirs(stage_dir, exist_ok=True)
     subprocess.run(["rclone", "copy", SOURCE, stage_dir, "-v"], check=True)
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "telethon", "requests"], check=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "telethon", "cryptg", "requests"], check=True)
     import requests
     from telethon.sync import TelegramClient
-    client = TelegramClient("/tmp/tg_sess", int(TG_API_ID), TG_API_HASH) if (TG_API_ID.isdigit() and TG_API_HASH) else None
-    if client:
-        client.start(bot_token=TG_TOKEN)
+    client = None
+    api_pairs = []
+    if TG_API_ID.isdigit() and TG_API_HASH:
+        api_pairs.append((int(TG_API_ID), TG_API_HASH.strip()))
+    if not api_pairs or api_pairs[0][0] != 2040:
+        api_pairs.append((2040, "b18441a1ff607e10a989891a5462e627"))
+    for pair_idx, (cur_id, cur_hash) in enumerate(api_pairs):
+        if client is not None:
+            break
+        for dc_id, dc_ip, dc_port in [(1, "149.154.175.53", 443), (2, "149.154.167.51", 443), (4, "149.154.167.91", 443), (5, "91.108.56.130", 443)]:
+            sess_file = f"/tmp/tg_sess_{pair_idx}_dc{dc_id}"
+            try:
+                c = TelegramClient(sess_file, cur_id, cur_hash, request_retries=3, connection_retries=3, retry_delay=2)
+                c.session.set_dc(dc_id, dc_ip, dc_port)
+                c.start(bot_token=TG_TOKEN)
+                client = c
+                break
+            except Exception as dc_err:
+                print(f"⚠️ MTProto auth attempt on DC {dc_id} failed: {dc_err}")
+                try:
+                    c.disconnect()
+                except Exception:
+                    pass
+                time.sleep(2)
     peer = int(target_chat) if target_chat.lstrip("-").isdigit() else target_chat
+    failed_count = 0
     for root_d, _, files in os.walk(stage_dir):
         for fn in sorted(files):
             fp = os.path.join(root_d, fn)
@@ -2148,10 +2170,17 @@ if DEST.lower().startswith("telegram:"):
             if client:
                 sent = client.send_file(peer, fp, caption=f"🎬 {fn}", supports_streaming=True)
                 msg_id = sent.id
-            else:
+            elif fsize <= 50 * 1024 * 1024:
                 with open(fp, "rb") as fobj:
                     r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendDocument", data={"chat_id": str(peer), "caption": f"🎬 {fn}"}, files={"document": (fn, fobj)}, timeout=600)
+                if not r.ok:
+                    failed_count += 1
+                    continue
                 msg_id = (r.json().get("result") or {}).get("message_id", 0)
+            else:
+                print(f"❌ Cannot upload {fn}: MTProto client unavailable and file exceeds 50 MB.")
+                failed_count += 1
+                continue
             entry_data = {"path": f"/{fn}", "name": fn, "size": fsize, "msgId": msg_id, "chatId": str(peer), "mtime": int(time.time())}
             print(f"RCLONEFLIX_TG_OFFLOAD_RESULT:{json.dumps(entry_data)}")
             auth_b64 = base64.b64encode(b"rcloneflix:rcloneflix-tg-2026").decode("ascii")
@@ -2162,7 +2191,7 @@ if DEST.lower().startswith("telegram:"):
             os.remove(fp)
     if client:
         client.disconnect()
-    sys.exit(0)
+    sys.exit(1 if failed_count > 0 else 0)
 
 cmd = ["rclone", "${op}", SOURCE, DEST, "-P", "--stats", "5s", "--transfers", "${transfers}", "--checkers", "${checkers}", "--buffer-size", "64M", "--retries", "3"]
 if ${driveAcross}: cmd.append("--server-side-across-configs")

@@ -86,16 +86,53 @@ jobs:
               ], check=True)
               return dest_path
 
+          async def connect_telethon_bot_async(session_prefix, api_id, api_hash, bot_token):
+              from telethon import TelegramClient
+              api_pairs = []
+              if api_id and str(api_id).strip().isdigit() and api_hash and len(str(api_hash).strip()) > 5:
+                  api_pairs.append((int(str(api_id).strip()), str(api_hash).strip()))
+              if not api_pairs or api_pairs[0][0] != 2040:
+                  api_pairs.append((2040, "b18441a1ff607e10a989891a5462e627"))
+              dc_candidates = [
+                  (1, "149.154.175.53", 443),
+                  (2, "149.154.167.51", 443),
+                  (4, "149.154.167.91", 443),
+                  (5, "91.108.56.130", 443),
+              ]
+              last_err = None
+              for pair_idx, (cur_id, cur_hash) in enumerate(api_pairs):
+                  for dc_id, dc_ip, dc_port in dc_candidates:
+                      sess_file = f"{session_prefix}_{pair_idx}_dc{dc_id}"
+                      for sfx in ("", ".session"):
+                          try:
+                              os.remove(sess_file + sfx)
+                          except Exception:
+                              pass
+                      try:
+                          print(f"⚙️ Connecting to Telegram MTProto (DC {dc_id} {dc_ip}:{dc_port}, api_id={cur_id})...")
+                          c = TelegramClient(sess_file, cur_id, cur_hash, request_retries=3, connection_retries=3, retry_delay=2)
+                          c.session.set_dc(dc_id, dc_ip, dc_port)
+                          await c.start(bot_token=bot_token)
+                          print(f"✅ Telethon MTProto authenticated on DC {dc_id}!")
+                          return c
+                      except Exception as dc_err:
+                          last_err = dc_err
+                          print(f"⚠️ MTProto auth attempt on DC {dc_id} failed: {dc_err}")
+                          try:
+                              await c.disconnect()
+                          except Exception:
+                              pass
+                          await asyncio.sleep(2)
+              raise RuntimeError(f"All Telegram MTProto DC sign-in attempts failed. Last error: {last_err}")
+
           def stage_from_telegram_mtproto(tg_items, stage_dir, api_id, api_hash, bot_token, default_chat):
-              if not (api_id and api_hash and bot_token):
-                  raise RuntimeError("Telegram API ID, API Hash, and Bot Token are required to download from telegram-drive:")
+              if not bot_token:
+                  raise RuntimeError("Telegram Bot Token is required to download from telegram-drive:")
               subprocess.run([sys.executable, "-m", "pip", "install", "-q", "telethon", "cryptg"], check=True)
               import asyncio
-              from telethon import TelegramClient
 
               async def _dl():
-                  client = TelegramClient("/tmp/rflix_tg_src", int(api_id), api_hash)
-                  await client.start(bot_token=bot_token)
+                  client = await connect_telethon_bot_async("/tmp/rflix_tg_src", api_id, api_hash, bot_token)
                   staged = []
                   for item in tg_items:
                       msg_id, chat_id, rel_path = int(item[0]), str(item[1] or default_chat), str(item[2])
@@ -246,92 +283,79 @@ jobs:
                       sys.exit(1)
 
                   print(f"Staged {len(staged_files)} file(s) for Telegram upload.")
-                  use_mtproto = bool(tg_api_id and tg_api_hash and tg_token)
+                  uploaded_rel_paths = []
+                  failed_files = []
+                  use_mtproto = bool(tg_token)
                   if use_mtproto:
                       print("🚀 Installing Telethon + Cryptg for 2 GB MTProto upload...")
                       subprocess.run([sys.executable, "-m", "pip", "install", "-q", "telethon", "cryptg"], check=True)
-                      from telethon import TelegramClient
                       from telethon.tl.types import DocumentAttributeFilename
 
                       async def run_mtproto_uploads():
-                          client = TelegramClient("/tmp/rflix_gha_tg", int(tg_api_id), tg_api_hash)
-                          await client.start(bot_token=tg_token)
+                          client = await connect_telethon_bot_async("/tmp/rflix_gha_tg", tg_api_id, tg_api_hash, tg_token)
                           target_entity = int(target_chat) if target_chat.lstrip("-").isdigit() else target_chat
                           for idx, fp in enumerate(staged_files, 1):
                               fname = os.path.basename(fp)
+                              rel_from_stage = os.path.relpath(fp, stage_dir).replace("\\", "/")
                               fsize = os.path.getsize(fp)
                               if fsize > 2000 * 1024 * 1024:
                                   print(f"⚠️ Skipping {fname} ({fsize} B): exceeds 2 GB Telegram limit.")
+                                  failed_files.append(fname)
                                   continue
                               print(f"[{idx}/{len(staged_files)}] Uploading {fname} ({fsize / (1024*1024):.2f} MB) via MTProto...")
-                              sent_msg = await client.send_file(
-                                  target_entity,
-                                  fp,
-                                  caption=f"📦 {fname}",
-                                  workers=4,
-                                  **tg_send_kwargs(fp, fname)
-                              )
-                              msg_id = getattr(sent_msg, "id", 0)
-                              folder = dest.split(":", 1)[1].strip("/").split("/")[0] if ":" in dest else ""
-                              if not folder:
-                                  folder = "TV Shows - TD" if "s0" in fname.lower() or "season" in fname.lower() else "Movies TD"
-                              rel_path = f"{folder}/{fname}" if folder else fname
-                              entry_data = {
-                                  "msgId": msg_id,
-                                  "chatId": str(target_chat),
-                                  "name": fname,
-                                  "size": fsize,
-                                  "folder": folder,
-                                  "remote": "telegram-drive",
-                                  "remotePath": f"telegram-drive:{rel_path}",
-                                  "path": "/" + rel_path,
-                                  "mtime": int(time.time())
-                              }
-                              print(f"RCLONEFLIX_TG_OFFLOAD_RESULT:{json.dumps(entry_data)}")
-                              os.remove(fp)
+                              try:
+                                  sent_msg = await client.send_file(
+                                      target_entity,
+                                      fp,
+                                      caption=f"📦 {fname}",
+                                      workers=4,
+                                      **tg_send_kwargs(fp, fname)
+                                  )
+                                  msg_id = getattr(sent_msg, "id", 0)
+                                  folder = dest.split(":", 1)[1].strip("/").split("/")[0] if ":" in dest else ""
+                                  if not folder:
+                                      folder = "TV Shows - TD" if "s0" in fname.lower() or "season" in fname.lower() else "Movies TD"
+                                  rel_path = f"{folder}/{fname}" if folder else fname
+                                  entry_data = {
+                                      "msgId": msg_id,
+                                      "chatId": str(target_chat),
+                                      "name": fname,
+                                      "size": fsize,
+                                      "folder": folder,
+                                      "remote": "telegram-drive",
+                                      "remotePath": f"telegram-drive:{rel_path}",
+                                      "path": "/" + rel_path,
+                                      "mtime": int(time.time())
+                                  }
+                                  print(f"RCLONEFLIX_TG_OFFLOAD_RESULT:{json.dumps(entry_data)}")
+                                  uploaded_rel_paths.append(rel_from_stage)
+                                  os.remove(fp)
+                              except Exception as up_err:
+                                  print(f"❌ Failed uploading {fname}: {up_err}")
+                                  failed_files.append(fname)
                           await client.disconnect()
 
                       asyncio.run(run_mtproto_uploads())
                   else:
-                      for idx, fp in enumerate(staged_files, 1):
-                          fname = os.path.basename(fp)
-                          fsize = os.path.getsize(fp)
-                          if fsize > 50 * 1024 * 1024:
-                              print(f"⚠️ Skipping {fname} ({fsize / (1024*1024):.1f} MB): exceeds 50MB Bot API limit. Please supply api_id/api_hash for MTProto upload.")
-                              continue
-                          print(f"[{idx}/{len(staged_files)}] Uploading {fname} via Bot HTTP API...")
-                          with open(fp, "rb") as fobj:
-                              r = requests.post(
-                                  f"https://api.telegram.org/bot{tg_token}/sendDocument",
-                                  data={"chat_id": target_chat, "caption": f"📦 {fname}"},
-                                  files={"document": (fname, fobj)},
-                                  timeout=900
-                              )
-                          if not r.ok:
-                              raise RuntimeError(f"Telegram Bot API error ({r.status_code}): {r.text}")
-                          resp_json = r.json()
-                          msg_id = (resp_json.get("result") or {}).get("message_id", 0)
-                          folder = dest.split(":", 1)[1].strip("/").split("/")[0] if ":" in dest else ""
-                          if not folder:
-                              folder = "TV Shows - TD" if "s0" in fname.lower() or "season" in fname.lower() else "Movies TD"
-                          rel_path = f"{folder}/{fname}" if folder else fname
-                          entry_data = {
-                              "msgId": msg_id,
-                              "chatId": str(target_chat),
-                              "name": fname,
-                              "size": fsize,
-                              "folder": folder,
-                              "remote": "telegram-drive",
-                              "remotePath": f"telegram-drive:{rel_path}",
-                              "path": "/" + rel_path,
-                              "mtime": int(time.time())
-                          }
-                          print(f"RCLONEFLIX_TG_OFFLOAD_RESULT:{json.dumps(entry_data)}")
-                          os.remove(fp)
+                      raise RuntimeError("Telegram Bot Token is required for Telegram offload.")
 
                   shutil.rmtree(stage_dir, ignore_errors=True)
-                  if partial_stage_err:
-                      print("⚠️ Telegram offload uploaded all staged files, but rclone staging reported partial errors (see above).")
+                  if op == "move" and not is_source_url and not payload.get("dry_run"):
+                      if len(uploaded_rel_paths) == 0:
+                          print(f"⚠️ Safeguard: 0 files uploaded to Telegram. Preserving all source files in '{source}'!")
+                      else:
+                          print(f"🗑️ Move operation requested: removing {len(uploaded_rel_paths)} verified uploaded file(s) from '{source}'...")
+                          if len(staged_files) == 1 and not batch_items and len(failed_files) == 0 and (source.rstrip("/").endswith("/" + uploaded_rel_paths[0]) or source.endswith(":" + uploaded_rel_paths[0])):
+                              subprocess.run(["rclone", "deletefile", source, "-v"], check=False)
+                          else:
+                              uploaded_list_file = "/tmp/rflix_gha_uploaded_tg.txt"
+                              with open(uploaded_list_file, "w", encoding="utf-8") as uf:
+                                  for rel_p in uploaded_rel_paths:
+                                      uf.write(rel_p + "\n")
+                              subprocess.run(["rclone", "delete", source, "--files-from-raw", uploaded_list_file, "-v"], check=False)
+
+                  if partial_stage_err or len(failed_files) > 0 or len(uploaded_rel_paths) == 0:
+                      print(f"❌ Telegram offload finished with errors ({len(failed_files)} failed uploads, partial_stage_err={partial_stage_err}).")
                       sys.exit(1)
                   print("✅ Telegram Cloud Offload completed successfully!")
 
@@ -665,8 +689,7 @@ jobs:
                           from telethon.tl.types import DocumentAttributeFilename
 
                           async def upload_tg_file():
-                              client = TelegramClient("/tmp/rflix_gha_tg_transcode", int(tg_api_id), tg_api_hash)
-                              await client.start(bot_token=tg_token)
+                              client = await connect_telethon_bot_async("/tmp/rflix_gha_tg_transcode", tg_api_id, tg_api_hash, tg_token)
                               target_entity = int(target_chat) if target_chat.lstrip("-").isdigit() else target_chat
                               sent_msg = await client.send_file(
                                   target_entity,

@@ -715,8 +715,45 @@ for idx, source_str in enumerate(expanded_queue, 1):
             from telethon.tl.types import DocumentAttributeFilename, DocumentAttributeVideo
 
             try:
-                client = TelegramClient("/tmp/rflix_kaggle_tg_transcode", int(TG_API_ID), TG_API_HASH)
-                client.start(bot_token=TG_BOT_TOKEN)
+                client = None
+                last_auth_err = None
+                api_pairs = [(int(TG_API_ID), TG_API_HASH.strip())]
+                if int(TG_API_ID) != 2040:
+                    api_pairs.append((2040, "b18441a1ff607e10a989891a5462e627"))
+                dc_candidates = [
+                    (1, "149.154.175.53", 443),
+                    (2, "149.154.167.51", 443),
+                    (4, "149.154.167.91", 443),
+                    (5, "91.108.56.130", 443),
+                ]
+                for pair_idx, (cur_id, cur_hash) in enumerate(api_pairs):
+                    if client is not None:
+                        break
+                    for dc_id, dc_ip, dc_port in dc_candidates:
+                        sess_file = f"/tmp/rflix_kaggle_tg_transcode_{{pair_idx}}_dc{{dc_id}}"
+                        for sfx in ("", ".session"):
+                            try:
+                                os.remove(sess_file + sfx)
+                            except Exception:
+                                pass
+                        try:
+                            print(f"⚙️ Connecting to Telegram MTProto (DC {{dc_id}} {{dc_ip}}:{{dc_port}}, api_id={{cur_id}})...")
+                            c = TelegramClient(sess_file, cur_id, cur_hash, request_retries=3, connection_retries=3, retry_delay=2)
+                            c.session.set_dc(dc_id, dc_ip, dc_port)
+                            c.start(bot_token=TG_BOT_TOKEN)
+                            client = c
+                            print(f"✅ Telethon MTProto authenticated on DC {{dc_id}}!")
+                            break
+                        except Exception as dc_err:
+                            last_auth_err = dc_err
+                            print(f"⚠️ MTProto auth attempt on DC {{dc_id}} failed: {{dc_err}}")
+                            try:
+                                c.disconnect()
+                            except Exception:
+                                pass
+                            time.sleep(2)
+                if client is None:
+                    raise RuntimeError(f"All Telegram MTProto DC sign-in attempts failed. Last error: {{last_auth_err}}")
 
                 last_up = [0]
                 def tg_progress(cur, tot):
@@ -1273,7 +1310,7 @@ if IS_DEST_TELEGRAM:
         sys.exit(1)
 
     print(f"\n📋 Total items to upload to Telegram: {{len(staged_files)}}")
-    subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "telethon", "requests"], check=False)
+    subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "telethon", "cryptg", "requests"], check=False)
     import requests
 
     def get_dest_folder(fname):
@@ -1336,19 +1373,51 @@ if IS_DEST_TELEGRAM:
     has_custom_api = bool(TG_API_ID and TG_API_ID.strip() and TG_API_ID.strip().isdigit() and TG_API_HASH and len(TG_API_HASH.strip()) > 5)
 
     client = None
-    if has_custom_api:
-        try:
-            from telethon.sync import TelegramClient
-            api_id_val = int(TG_API_ID.strip())
-            api_hash_val = TG_API_HASH.strip()
-            print("⚙️ Connecting to Telegram MTProto with configured api_id/api_hash...")
-            client = TelegramClient("tg_cloud_worker", api_id_val, api_hash_val)
-            client.start(bot_token=TG_BOT_TOKEN)
-            print("✅ Telethon MTProto client authenticated!")
-        except Exception as e:
-            print(f"⚠️ Telethon MTProto authentication failed: {{e}}")
-            print("👉 Check your api_id and api_hash from https://my.telegram.org in Settings -> Telegram.")
-            client = None
+    last_mtproto_err = None
+    try:
+        from telethon.sync import TelegramClient
+        api_pairs = []
+        if has_custom_api:
+            api_pairs.append((int(TG_API_ID.strip()), TG_API_HASH.strip()))
+        if not api_pairs or api_pairs[0][0] != 2040:
+            api_pairs.append((2040, "b18441a1ff607e10a989891a5462e627"))
+
+        dc_candidates = [
+            (1, "149.154.175.53", 443),
+            (2, "149.154.167.51", 443),
+            (4, "149.154.167.91", 443),
+            (5, "91.108.56.130", 443),
+        ]
+        for pair_idx, (cur_id, cur_hash) in enumerate(api_pairs):
+            if client is not None:
+                break
+            for dc_id, dc_ip, dc_port in dc_candidates:
+                sess_file = f"/tmp/tg_cloud_worker_{{pair_idx}}_dc{{dc_id}}"
+                for sfx in ("", ".session"):
+                    try:
+                        os.remove(sess_file + sfx)
+                    except Exception:
+                        pass
+                try:
+                    print(f"⚙️ Connecting to Telegram MTProto (DC {{dc_id}} {{dc_ip}}:{{dc_port}}, api_id={{cur_id}})...")
+                    c = TelegramClient(sess_file, cur_id, cur_hash, request_retries=3, connection_retries=3, retry_delay=2)
+                    c.session.set_dc(dc_id, dc_ip, dc_port)
+                    c.start(bot_token=TG_BOT_TOKEN)
+                    client = c
+                    print(f"✅ Telethon MTProto client authenticated on DC {{dc_id}}!")
+                    break
+                except Exception as dc_err:
+                    last_mtproto_err = dc_err
+                    print(f"⚠️ Telethon MTProto auth attempt on DC {{dc_id}} failed: {{dc_err}}")
+                    try:
+                        c.disconnect()
+                    except Exception:
+                        pass
+                    time.sleep(2)
+    except Exception as e:
+        last_mtproto_err = e
+        print(f"⚠️ Telethon initialization error: {{e}}")
+        client = None
 
     index_entries = []
     index_msg_id = None
@@ -1365,8 +1434,12 @@ if IS_DEST_TELEGRAM:
         except Exception as idx_err:
             print(f"⚠️ Could not load existing .rflix_tg_index.json: {{idx_err}}")
 
+    uploaded_rel_paths = []
+    failed_files = []
+
     for fp in staged_files:
         fn = os.path.basename(fp)
+        rel_from_stage = os.path.relpath(fp, STAGE_DIR).replace("\\", "/")
         sz_bytes = os.path.getsize(fp)
         sz_mb = round(sz_bytes / (1024 * 1024), 2)
         print(f"\n✈️ Preparing upload for [{{target_peer}}]: {{fn}} ({{sz_mb}} MB)...")
@@ -1414,21 +1487,26 @@ if IS_DEST_TELEGRAM:
                 index_entries.append(entry_data)
                 print(f"RCLONEFLIX_TG_OFFLOAD_RESULT:{{json.dumps(entry_data)}}")
             except Exception as e:
-                print(f"⚠️ Telethon upload failed: {{e}}")
+                print(f"⚠️ Telethon upload failed for {{fn}}: {{e}}")
 
         if not uploaded:
             if sz_bytes <= 50 * 1024 * 1024:
                 uploaded = upload_via_bot_api(fp, target_peer, TG_BOT_TOKEN)
             else:
-                print(f"\n❌ File is {{sz_mb}} MB. Standard Telegram Bot API caps uploads at 50 MB.")
-                print("💡 To upload files larger than 50MB (up to 2,000 MB / 2 GB), Telegram requires your own free API ID and API Hash from https://my.telegram.org.")
-                print("👉 Please log into https://my.telegram.org, create an app, and enter your api_id and api_hash in RcloneFlix -> Settings -> Telegram.")
+                if has_custom_api:
+                    print(f"\n❌ Cannot upload {{fn}} ({{sz_mb}} MB): file exceeds 50 MB Bot HTTP API limit and MTProto session failed ({{last_mtproto_err}}).")
+                else:
+                    print(f"\n❌ File is {{sz_mb}} MB. Standard Telegram Bot API caps uploads at 50 MB.")
+                    print("💡 To upload files larger than 50MB (up to 2,000 MB / 2 GB), enter your api_id and api_hash in RcloneFlix -> Settings -> Telegram.")
 
         if uploaded:
+            uploaded_rel_paths.append(rel_from_stage)
             try:
                 os.remove(fp)
             except:
                 pass
+        else:
+            failed_files.append(fn)
 
     if client and index_entries:
         try:
@@ -1460,12 +1538,24 @@ if IS_DEST_TELEGRAM:
             pass
 
     if OPERATION == "move" and not IS_SOURCE_URL and not DRY_RUN:
-        print(f"🗑️ Move operation requested: removing transferred source files from '{{SOURCE}}'...")
-        del_cmd = ["rclone", "delete", SOURCE, "-v"]
-        apply_batch_filter(del_cmd)
-        subprocess.run(del_cmd, check=False)
+        if len(uploaded_rel_paths) == 0:
+            print(f"\n⚠️ Safeguard: 0 files were uploaded to Telegram. Skipping source deletion so all files in '{{SOURCE}}' remain intact!")
+        else:
+            print(f"\n🗑️ Move operation requested: removing {{len(uploaded_rel_paths)}} verified uploaded file(s) from '{{SOURCE}}'...")
+            if len(staged_files) == 1 and not HAS_BATCH_FILTER and len(failed_files) == 0 and (SOURCE.rstrip("/").endswith("/" + uploaded_rel_paths[0]) or SOURCE.endswith(":" + uploaded_rel_paths[0])):
+                subprocess.run(["rclone", "deletefile", SOURCE, "-v"], check=False)
+            else:
+                uploaded_list_file = "/tmp/rflix_uploaded_tg_files.txt"
+                with open(uploaded_list_file, "w", encoding="utf-8") as uf:
+                    for rel_p in uploaded_rel_paths:
+                        uf.write(rel_p + "\n")
+                subprocess.run(["rclone", "delete", SOURCE, "--files-from-raw", uploaded_list_file, "-v"], check=False)
 
-    print("\n🎉 Cloud-to-Telegram Transfer Completed Successfully!")
+    if len(failed_files) > 0 or len(uploaded_rel_paths) == 0:
+        print(f"\n❌ Cloud-to-Telegram Transfer Failed: {{len(failed_files)}}/{{len(staged_files)}} file(s) failed to upload.")
+        sys.exit(1)
+
+    print(f"\n🎉 Cloud-to-Telegram Transfer Completed Successfully ({{len(uploaded_rel_paths)}}/{{len(staged_files)}} uploaded)!")
     sys.exit(0)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1513,8 +1603,12 @@ elif IS_DEST_STREAMTAPE:
     if skipped_count > 0:
         print(f"ℹ️ Skipping {{skipped_count}} non-video metadata files (.nfo, subtitles, artwork) for Streamtape.")
 
+    uploaded_st_rel_paths = []
+    failed_st_files = []
+
     for fp in video_files:
         fn = os.path.basename(fp)
+        rel_from_stage = os.path.relpath(fp, STAGE_DIR).replace("\\", "/")
         sz_mb = round(os.path.getsize(fp) / (1024 * 1024), 2)
         print(f"\n📼 Requesting Streamtape upload ticket for {{fn}} ({{sz_mb}} MB)...")
 
@@ -1549,7 +1643,10 @@ elif IS_DEST_STREAMTAPE:
                 print(f"⚠️ Streamtape upload attempt {{attempt}}/3 error: {{up_err}}")
                 time.sleep(4)
 
-        if not upload_success:
+        if upload_success:
+            uploaded_st_rel_paths.append(rel_from_stage)
+        else:
+            failed_st_files.append(fn)
             print(f"❌ Failed uploading {{fn}} after 3 attempts. Continuing remaining files...")
 
         try:
@@ -1558,10 +1655,22 @@ elif IS_DEST_STREAMTAPE:
             pass
 
     if OPERATION == "move" and not IS_SOURCE_URL and not DRY_RUN:
-        print(f"🗑️ Move operation requested: removing transferred source files from '{{SOURCE}}'...")
-        del_cmd = ["rclone", "delete", SOURCE, "-v"]
-        apply_batch_filter(del_cmd)
-        subprocess.run(del_cmd, check=False)
+        if len(uploaded_st_rel_paths) == 0:
+            print(f"\n⚠️ Safeguard: 0 files were uploaded to Streamtape. Skipping source deletion so all files in '{{SOURCE}}' remain intact!")
+        else:
+            print(f"\n🗑️ Move operation requested: removing {{len(uploaded_st_rel_paths)}} verified uploaded file(s) from '{{SOURCE}}'...")
+            if len(video_files) == 1 and not HAS_BATCH_FILTER and len(failed_st_files) == 0 and (SOURCE.rstrip("/").endswith("/" + uploaded_st_rel_paths[0]) or SOURCE.endswith(":" + uploaded_st_rel_paths[0])):
+                subprocess.run(["rclone", "deletefile", SOURCE, "-v"], check=False)
+            else:
+                uploaded_list_file = "/tmp/rflix_uploaded_st_files.txt"
+                with open(uploaded_list_file, "w", encoding="utf-8") as uf:
+                    for rel_p in uploaded_st_rel_paths:
+                        uf.write(rel_p + "\n")
+                subprocess.run(["rclone", "delete", SOURCE, "--files-from-raw", uploaded_list_file, "-v"], check=False)
+
+    if len(failed_st_files) > 0 or (len(video_files) > 0 and len(uploaded_st_rel_paths) == 0):
+        print(f"\n❌ Cloud-to-Streamtape Transfer Failed: {{len(failed_st_files)}}/{{len(video_files)}} file(s) failed to upload.")
+        sys.exit(1)
 
     print("\n🎉 Cloud-to-Streamtape Transfer Pipeline Completed!")
     sys.exit(0)
