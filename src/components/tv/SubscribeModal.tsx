@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { X, Bell, Sparkles, Globe, Radio, Layers, Zap, Plus } from "lucide-react";
 import { useAppStore, type TvSubscription } from "../../store/appStore";
 import { useToastStore } from "../../store/toastStore";
+import { isNonStandardRclonePath, pickPreferredRcloneRoot } from "../../lib/tvSubscriptionEngine";
 
 /** Common scene/P2P release groups offered as one-click chips. Free text adds any other. */
 const SUGGESTED_GROUPS = [
@@ -40,7 +41,7 @@ type Props = {
 };
 
 export function SubscribeModal({ isOpen, onClose, seed, existing }: Props) {
-  const { upsertTvSubscription, kaggleUsername, ghaConfig, easynewsConfig, libraries } = useAppStore();
+  const { upsertTvSubscription, kaggleUsername, ghaConfig, easynewsConfig, streamtapeConfig, libraries } = useAppStore();
   const addToast = useToastStore((s) => s.addToast);
 
   const cloudWorkerAvailable = Boolean(kaggleUsername || ghaConfig?.enabled);
@@ -63,9 +64,15 @@ export function SubscribeModal({ isOpen, onClose, seed, existing }: Props) {
   const [transcode, setTranscode] = useState<boolean>(
     existing?.transcodeToMp4 ?? cloudWorkerAvailable
   );
-  const [destPath, setDestPath] = useState<string>(
-    existing?.destinationRemotePath ?? seed.destinationRemotePath ?? ""
-  );
+  const [destPath, setDestPath] = useState<string>(() => {
+    if (existing?.destinationRemotePath) return existing.destinationRemotePath;
+    if (seed.destinationRemotePath && !isNonStandardRclonePath(seed.destinationRemotePath)) {
+      return seed.destinationRemotePath;
+    }
+    const lib = libraries.find((l) => l.id === (seed.libraryId || libraries[0]?.id));
+    const root = pickPreferredRcloneRoot(lib, libraries);
+    return root ? `${root}/${seed.seriesTitle}` : seed.destinationRemotePath || "";
+  });
   const [targetLibId, setTargetLibId] = useState<string>(
     existing?.libraryId ?? seed.libraryId ?? libraries[0]?.id ?? ""
   );
@@ -90,7 +97,7 @@ export function SubscribeModal({ isOpen, onClose, seed, existing }: Props) {
   };
 
   const handleSave = () => {
-    const finalDest = (existing?.destinationRemotePath ?? destPath).trim();
+    const finalDest = destPath.trim();
     if (!finalDest) {
       addToast("Please enter a destination remote path.", "error");
       return;
@@ -200,44 +207,76 @@ export function SubscribeModal({ isOpen, onClose, seed, existing }: Props) {
             />
           </div>
 
-          {/* Destination path (editable when seed had none) */}
-          {!existing?.destinationRemotePath && !seed.destinationRemotePath && (
-            <div className="space-y-2">
-              <div>
-                <label className="text-[11px] uppercase tracking-wider font-mono text-subtle mb-1.5 block">
-                  Target Library
-                </label>
-                <select
-                  value={targetLibId}
-                  onChange={(e) => {
-                    const libId = e.target.value;
-                    setTargetLibId(libId);
-                    const lib = libraries.find((l) => l.id === libId);
-                    if (lib?.remotePaths?.[0] && !destPath) {
-                      setDestPath(`${lib.remotePaths[0].replace(/\/+$/, "")}/${seed.seriesTitle}`);
+          {/* Destination path */}
+          <div className="space-y-2">
+            <div>
+              <label className="text-[11px] uppercase tracking-wider font-mono text-subtle mb-1.5 block">
+                Target Library
+              </label>
+              <select
+                value={targetLibId}
+                onChange={(e) => {
+                  const libId = e.target.value;
+                  setTargetLibId(libId);
+                  const lib = libraries.find((l) => l.id === libId);
+                  const root = pickPreferredRcloneRoot(lib, libraries);
+                  if (root && !destPath) {
+                    setDestPath(`${root}/${seed.seriesTitle}`);
+                  }
+                }}
+                className="input-field w-full text-xs"
+              >
+                {libraries.map((l) => (
+                  <option key={l.id} value={l.id}>{l.name} ({l.type})</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[11px] uppercase tracking-wider font-mono text-subtle mb-1.5 block">
+                Destination Remote Path
+              </label>
+              <input
+                type="text"
+                value={destPath}
+                onChange={(e) => setDestPath(e.target.value)}
+                placeholder="e.g. gdrive:TV Shows/ShowName"
+                className="input-field w-full text-xs font-mono"
+              />
+              <div className="flex flex-wrap gap-1.5 pt-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const lib = libraries.find((l) => l.id === targetLibId);
+                    const root = pickPreferredRcloneRoot(lib, libraries);
+                    if (root) {
+                      setDestPath(`${root}/${seed.seriesTitle}`);
+                    } else {
+                      addToast("No standard rclone remote found in libraries.", "error");
                     }
                   }}
-                  className="input-field w-full text-xs"
+                  className="px-2.5 py-1 rounded-lg text-[11px] font-medium border border-border bg-surface text-subtle hover:text-bright hover:border-accent/50 cursor-pointer"
                 >
-                  {libraries.map((l) => (
-                    <option key={l.id} value={l.id}>{l.name} ({l.type})</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-[11px] uppercase tracking-wider font-mono text-subtle mb-1.5 block">
-                  Destination Remote Path
-                </label>
-                <input
-                  type="text"
-                  value={destPath}
-                  onChange={(e) => setDestPath(e.target.value)}
-                  placeholder="e.g. gdrive:TV Shows/ShowName"
-                  className="input-field w-full text-xs font-mono"
-                />
+                  Use Rclone Remote
+                </button>
+                <button
+                  type="button"
+                  disabled={!streamtapeConfig?.apiLogin?.trim() || !streamtapeConfig?.apiKey?.trim()}
+                  title={
+                    streamtapeConfig?.apiLogin?.trim() && streamtapeConfig?.apiKey?.trim()
+                      ? "Route downloads to Streamtape (ideal for ephemeral sports/events)"
+                      : "Configure Streamtape API credentials in Settings first"
+                  }
+                  onClick={() => {
+                    const folder = seed.subscriptionKind === "dated_scene" ? "Sports" : "TV Shows";
+                    setDestPath(`streamtape:/${folder}/${seed.seriesTitle}`);
+                  }}
+                  className="px-2.5 py-1 rounded-lg text-[11px] font-medium border border-border bg-surface text-subtle hover:text-bright hover:border-accent/50 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Use Streamtape (Ephemeral / Sports)
+                </button>
               </div>
             </div>
-          )}
+          </div>
 
           {/* Preferred release groups */}
           <div>

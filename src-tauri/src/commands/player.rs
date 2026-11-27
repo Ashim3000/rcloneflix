@@ -789,7 +789,7 @@ pub async fn open_media(
         let encoded = percent_encode_path(&full_relative);
         format!("{}/{}", clean_base, encoded)
     } else if clean_rm == "usenet-drive" {
-        let encoded = percent_encode_path(file_path.trim_start_matches(['/', '\\']));
+        let encoded = percent_encode_path(&full_relative);
         format!("http://127.0.0.1:8553/dav/{}", encoded)
     } else if let Some(local_path) = find_fuse_local_path(remote_name, &full_relative) {
         local_path.to_string_lossy().into_owned()
@@ -907,6 +907,11 @@ pub async fn player_get_tracks(vlc: State<'_, VlcManager>) -> Result<VlcTrackLis
 #[tauri::command]
 pub fn check_fuse_path(remote_root: String, file_path: String) -> Option<String> {
     let (remote_name, root_sub_path) = parse_remote_root(&remote_root);
+    // usenet-drive is served by the in-process WebDAV engine (127.0.0.1:8553); wrapping its
+    // FUSE mount in `rclone serve http` would double-proxy every NNTP read.
+    if remote_name.trim().trim_end_matches(':').eq_ignore_ascii_case("usenet-drive") {
+        return None;
+    }
     let full_relative = format!(
         "{}/{}",
         root_sub_path.trim_matches('/'),

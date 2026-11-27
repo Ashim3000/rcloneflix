@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 import {
@@ -23,6 +23,30 @@ import {
 import { persistItems } from "../../lib/libraryDb";
 import { useToastStore } from "../../store/toastStore";
 import { isDropmbUrl, resolveDropmbShareTracks } from "../../lib/dropmbOffload";
+import { searchScenesByFragment, parseAdultSceneFragment } from "../../lib/stashBox";
+import { dispatchCloudTask } from "../../lib/cloudWorkerRouter";
+import { useCloudTransferStore } from "../../lib/kaggleTransfer";
+
+const LOCALHOST_RE = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?/i;
+const IP_BOUND_HOSTS = [
+  "streamed.pk", "embedsports", "moviebite", "yomi.to", "cinextream", "bunkr", "sxyprn",
+  "ok.ru", "vk.com", "vkuser", "tapecontent.net",
+];
+
+/** Cloud save is only safe for plain, re-fetchable direct media URLs. */
+export function classifyCloudSaveEligibility(info: WebStreamInfo | null): { eligible: boolean; url: string; reason: string } {
+  if (!info) return { eligible: false, url: "", reason: "Inspect a stream first." };
+  const candidate = ((info.direct_stream_url || "").trim() && !LOCALHOST_RE.test((info.direct_stream_url || "").trim())
+    ? (info.direct_stream_url || "").trim()
+    : (info.original_url || "").trim());
+  const lower = candidate.toLowerCase();
+  if (!/^https?:\/\//i.test(candidate)) return { eligible: false, url: candidate, reason: "Not an HTTP(S) URL." };
+  if (LOCALHOST_RE.test(candidate)) return { eligible: false, url: candidate, reason: "Local stream (127.0.0.1) is only reachable from this device." };
+  if (IP_BOUND_HOSTS.some((d) => lower.includes(d))) return { eligible: false, url: candidate, reason: "IP-bound or short-lived portal link — must download locally." };
+  if (lower.includes(".m3u8") || lower.includes(".mpd")) return { eligible: false, url: candidate, reason: "Segmented stream — stitched locally via yt-dlp." };
+  if (!info.is_direct_media) return { eligible: false, url: candidate, reason: "Not a direct media file." };
+  return { eligible: true, url: candidate, reason: "Direct file — can be transferred by a Kaggle worker with zero local bandwidth." };
+}
 
 type Props = {
   isOpen: boolean;
@@ -44,7 +68,7 @@ type FixMatchResult = {
   overview?: string;
   rating?: number;
   genres?: string[];
-  source: "cinemeta" | "tmdb" | "theporndb";
+  source: "cinemeta" | "tmdb" | "theporndb" | "stashbox";
 };
 
 export function AddStreamBookmarkModal({
@@ -58,7 +82,7 @@ export function AddStreamBookmarkModal({
   autoInspect,
 }: Props) {
   const navigate = useNavigate();
-  const { libraries, addLibrary, upsertMediaItem, tmdbApiKey, thePornDbApiKey, rcloneConfigPath } = useAppStore();
+  const { libraries, addLibrary, upsertMediaItem, tmdbApiKey, thePornDbApiKey, rcloneConfigPath, stashBoxProviders, kaggleUsername, kaggleKey } = useAppStore();
   const addToast = useToastStore((s) => s.addToast);
 
   const [url, setUrl] = useState(initialUrl || "");
@@ -76,6 +100,11 @@ export function AddStreamBookmarkModal({
   const [localDownloadPath, setLocalDownloadPath] = useState<string>("~/Downloads/RcloneFlix");
   const [selectedRemotePath, setSelectedRemotePath] = useState<string>("");
   const [showCloudTranscode, setShowCloudTranscode] = useState(false);
+
+  const kaggleReady = Boolean(kaggleUsername?.trim() && kaggleKey?.trim());
+  const cloudEligibility = useMemo(() => classifyCloudSaveEligibility(streamInfo), [streamInfo]);
+  const [useCloudWorker, setUseCloudWorker] = useState(true);
+  const canUseCloud = kaggleReady && cloudEligibility.eligible;
 
   // Fix Match Drawer state
   const [showFixMatch, setShowFixMatch] = useState(false);
@@ -469,28 +498,59 @@ export function AddStreamBookmarkModal({
             });
           }
         }
-      } else if (libraryType === "adult" && thePornDbApiKey) {
-        try {
-          const res = await fetch(
-            `https://api.theporndb.net/scenes?q=${encodeURIComponent(q)}`,
-            { headers: { Authorization: `Bearer ${thePornDbApiKey}` } }
-          );
-          if (res.ok) {
-            const data = await res.json();
-            (data.data ?? []).slice(0, 8).forEach((scene: any) => {
-              const poster = scene.poster || scene.posters?.large || scene.posters?.medium;
-              const y = scene.date ? parseInt(scene.date.substring(0, 4), 10) : undefined;
-              results.push({
-                id: String(scene.id),
-                title: scene.title || q,
-                year: isNaN(y as number) ? undefined : y,
-                posterUrl: poster,
-                overview: scene.description,
-                source: "theporndb",
-              });
+      } else if (libraryType === "adult") {
+        // Stash-Box providers first
+        const frag = parseAdultSceneFragment(q);
+        const sbProviders = (stashBoxProviders ?? []).filter((p) => p.enabled && p.endpoint?.trim());
+        const sbGroups = await Promise.all(
+          sbProviders.map((p) => searchScenesByFragment(p, frag, undefined).catch(() => []))
+        );
+        const seenSb = new Set<string>();
+        for (const group of sbGroups) {
+          for (const s of group) {
+            if (s.source !== "stashbox") continue;
+            const key = `stashbox:${s.id}`;
+            if (seenSb.has(key)) continue;
+            seenSb.add(key);
+            results.push({
+              id: s.id,
+              title: s.title,
+              year: s.date ? parseInt(s.date.substring(0, 4), 10) || undefined : undefined,
+              genres: s.tags.length ? s.tags : undefined,
+              posterUrl: s.posterUrl,
+              overview: [
+                s.date ? `Released: ${s.date}` : "",
+                s.studio ? `Studio: ${s.studio}` : "",
+                s.performers.length ? `Performers: ${s.performers.join(", ")}` : "",
+                s.details || "",
+              ].filter(Boolean).join(" • "),
+              source: "stashbox",
             });
           }
-        } catch {}
+        }
+        if (thePornDbApiKey) {
+          try {
+            const res = await fetch(
+              `https://api.theporndb.net/scenes?q=${encodeURIComponent(q)}`,
+              { headers: { Authorization: `Bearer ${thePornDbApiKey}` } }
+            );
+            if (res.ok) {
+              const data = await res.json();
+              (data.data ?? []).slice(0, 8).forEach((scene: any) => {
+                const poster = scene.poster || scene.posters?.large || scene.posters?.medium;
+                const y = scene.date ? parseInt(scene.date.substring(0, 4), 10) : undefined;
+                results.push({
+                  id: String(scene.id),
+                  title: scene.title || q,
+                  year: isNaN(y as number) ? undefined : y,
+                  posterUrl: poster,
+                  overview: scene.description,
+                  source: "theporndb",
+                });
+              });
+            }
+          } catch {}
+        }
       }
 
       setFixMatchResults(results);
@@ -527,6 +587,47 @@ export function AddStreamBookmarkModal({
       streamInfo.original_url.includes("streamed");
     const title = editableTitle.trim() || streamInfo.clean_title || (isSports ? "Live Sports Stream" : "Web Stream");
     const streamLocation = streamInfo.direct_stream_url || streamInfo.original_url;
+
+    if (ingestMode === "download_remote" && canUseCloud && useCloudWorker && selectedRemotePath.trim()) {
+      const ext = streamInfo.format || cloudEligibility.url.match(/\.([a-z0-9]{2,5})(?:$|\?)/i)?.[1]?.toLowerCase() || "mp4";
+      const safe = title.replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim();
+      const filename = safe.toLowerCase().endsWith(`.${ext}`) ? safe : `${safe}.${ext}`;
+      try {
+        const jobId = `url-xfer-${Date.now()}`;
+        const res = await dispatchCloudTask({
+          jobType: "rclone_transfer",
+          payload: {
+            job_id: jobId,
+            operation: "copy",
+            source: cloudEligibility.url,
+            destination: selectedRemotePath.trim(),
+            dest_filename: filename,
+            transfers: 4,
+            checkers: 8,
+            rclone_config_snippet: useAppStore.getState().rcloneConfigContent || undefined,
+          },
+          title: filename,
+          providerOverride: "kaggle",
+        });
+        useCloudTransferStore.getState().addJob({
+          id: jobId,
+          title: filename,
+          operation: "copy",
+          source: cloudEligibility.url,
+          destination: selectedRemotePath.trim(),
+          kernelSlug: res.kernelSlug || res.jobId,
+          kernelUrl: res.url,
+          status: "queued",
+          createdAt: Date.now(),
+          provider: "kaggle",
+        });
+        addToast(`Dispatched "${filename}" to Kaggle cloud worker`, "success", 5000);
+        onClose();
+      } catch (err: any) {
+        setErrorMsg(`Failed dispatching cloud transfer: ${err?.message || String(err)}`);
+      }
+      return;
+    }
 
     if (ingestMode === "download_local" || ingestMode === "download_remote") {
       // Trigger yt-dlp download & remux to .mp4
@@ -1180,7 +1281,24 @@ export function AddStreamBookmarkModal({
 
                   {/* Save to Cloud Remote selection */}
                   {ingestMode === "download_remote" && (
-                    <div className="pt-1">
+                    <div className="pt-1 space-y-2">
+                      <label
+                        className={`flex items-center gap-2 text-[11px] ${canUseCloud ? "text-text" : "text-subtle opacity-60"}`}
+                        title={canUseCloud ? cloudEligibility.reason : !kaggleReady ? "Configure Kaggle in Settings" : cloudEligibility.reason}
+                      >
+                        <input
+                          type="checkbox"
+                          disabled={!canUseCloud}
+                          checked={canUseCloud && useCloudWorker}
+                          onChange={(e) => setUseCloudWorker(e.target.checked)}
+                        />
+                        Run on Kaggle cloud worker (no local bandwidth)
+                        {!canUseCloud && (
+                          <span className="text-[10px] text-amber-400/90 ml-1">
+                            — {!kaggleReady ? "Kaggle not configured" : cloudEligibility.reason}
+                          </span>
+                        )}
+                      </label>
                       <label className="block text-[11px] font-medium text-subtle mb-1">
                         Destination Cloud Remote Directory
                       </label>

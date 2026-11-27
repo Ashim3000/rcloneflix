@@ -1,6 +1,6 @@
 [package]
 name = "rcloneflix"
-version = "1.0.41"
+version = "1.0.42"
 description = "RcloneFlix - Stream media from rclone remotes"
 authors = ["RcloneFlix"]
 license = "GPL-3.0-only"
@@ -38,6 +38,7 @@ flate2 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "http2"] }
 base64 = "0.23.1"
 aes-gcm = "0.10"
+aes = "0.8"
 pbkdf2 = "0.12"
 sha2 = "0.10"
 hmac = "0.12"

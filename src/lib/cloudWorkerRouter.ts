@@ -603,9 +603,13 @@ export async function dispatchCloudTask(params: {
   status: string;
   reason: string;
 }> {
-  if (params.jobType === "video_transcode" && typeof params.payload === "object" && params.payload !== null) {
+  if (
+    (params.jobType === "video_transcode" || params.jobType === "rclone_transfer") &&
+    typeof params.payload === "object" &&
+    params.payload !== null
+  ) {
     const { telegramConfig, streamtapeConfig } = useAppStore.getState();
-    const dest = (params.payload.dest_remote_folder || "").toLowerCase();
+    const dest = String(params.payload.dest_remote_folder || params.payload.destination || "").toLowerCase();
     if (dest.startsWith("telegram:") || dest.startsWith("telegram-drive:") || dest.startsWith("tg-")) {
       params.payload.telegram_bot_token = params.payload.telegram_bot_token || telegramConfig?.botToken?.trim() || undefined;
       params.payload.telegram_chat_id = params.payload.telegram_chat_id || telegramConfig?.chatId?.trim() || undefined;

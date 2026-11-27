@@ -1,12 +1,13 @@
 use infinidysk_archive::rar;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use tauri::AppHandle;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 
 pub trait NntpIo: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> NntpIo for T {}
@@ -89,14 +90,132 @@ pub struct PlayableFile {
     pub virtual_path: Option<String>,
 }
 
+const SEGMENT_CACHE_CAPACITY: usize = 32; // ≈ 24 MB of decoded 768 KB segments
+const POOL_MAX_IDLE: usize = 6;
+
+type NntpConn = BufReader<Box<dyn NntpIo>>;
+
 pub struct UsenetEngineState {
     pub config: RwLock<Option<UsenetServerConfig>>,
     pub files: RwLock<HashMap<String, VirtualFile>>,
     pub config_path: PathBuf,
     pub mounts_path: PathBuf,
+    /// Idle, authenticated NNTP connections (never contains a connection that errored).
+    pub conn_pool: Mutex<Vec<NntpConn>>,
+    /// Caps simultaneously *in-use* NNTP connections to the provider limit.
+    pub conn_sem: std::sync::RwLock<Arc<Semaphore>>,
+    /// Bumped whenever config changes; sockets from an older epoch are never pooled.
+    pub pool_epoch: AtomicU64,
+    /// FIFO cache of decoded yEnc segments: message_id (no <>) -> bytes.
+    pub seg_cache: Mutex<VecDeque<(String, Arc<Vec<u8>>)>>,
 }
 
 static USENET_ENGINE: OnceLock<Arc<UsenetEngineState>> = OnceLock::new();
+
+/// Decodes XML entities in a single pass: &quot; &apos; &amp; &lt; &gt; and any
+/// numeric reference (&#34; &#x22; …). Unknown entities are left untouched.
+pub fn xml_unescape(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        if let Some(semi) = tail.find(';').filter(|&p| p > 1 && p <= 10) {
+            let ent = &tail[1..semi];
+            let rep: Option<char> = match ent {
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                _ if ent.starts_with("#x") || ent.starts_with("#X") => {
+                    u32::from_str_radix(&ent[2..], 16).ok().and_then(char::from_u32)
+                }
+                _ if ent.starts_with('#') => ent[1..].parse::<u32>().ok().and_then(char::from_u32),
+                _ => None,
+            };
+            if let Some(c) = rep {
+                out.push(c);
+                rest = &tail[semi + 1..];
+                continue;
+            }
+        }
+        out.push('&');
+        rest = &tail[1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Clean filename from an NZB `<file subject="…">` value (entities decoded first).
+/// `"Name.mkv" yEnc (1/1444)` -> `Name.mkv`; unquoted subjects get the trailing
+/// ` yEnc (n/m)` and a leading `[n/m] - ` stripped. Never returns path separators.
+pub fn extract_clean_subject_filename(raw_subject: &str) -> String {
+    let decoded = xml_unescape(raw_subject);
+    let subject = decoded.trim();
+    if let Some(q1) = subject.find('"') {
+        if let Some(q2) = subject[q1 + 1..].find('"') {
+            let cand = subject[q1 + 1..q1 + 1 + q2].trim();
+            if !cand.is_empty() {
+                return cand.rsplit(['/', '\\']).next().unwrap_or(cand).to_string();
+            }
+        }
+    }
+    let mut s = subject;
+    if let Some(i) = s.to_ascii_lowercase().rfind(" yenc") {
+        s = s[..i].trim();
+    }
+    if s.starts_with('[') {
+        if let Some(i) = s.find("] - ") {
+            s = s[i + 4..].trim();
+        }
+    }
+    let s = s.trim_matches('"').trim();
+    s.rsplit(['/', '\\']).next().unwrap_or(s).to_string()
+}
+
+fn name_needs_heal(n: &str) -> bool {
+    n.contains("&quot;") || n.contains("&#") || n.to_ascii_lowercase().contains(" yenc")
+}
+
+/// Repairs persisted mounts whose names were saved with raw subject text such as
+/// `&quot;Show.S01E01.mkv&quot; yEnc (1/1444)`. Clean names are never touched.
+fn heal_persisted_mounts(raw: HashMap<String, VirtualFile>) -> (HashMap<String, VirtualFile>, bool) {
+    let mut healed = HashMap::with_capacity(raw.len());
+    let mut changed = false;
+    for (old_key, mut vf) in raw {
+        if name_needs_heal(&vf.name) {
+            let clean = extract_clean_subject_filename(&vf.name);
+            if !clean.is_empty() && clean != vf.name {
+                // Legacy mounts may have virtual_path == None; their folder prefix then lives in the key.
+                let vp = vf.virtual_path.clone().unwrap_or_else(|| old_key.clone());
+                let prefix = vp
+                    .strip_suffix(vf.name.as_str())
+                    .unwrap_or_else(|| parent_of(&vp))
+                    .trim_end_matches('/')
+                    .to_string();
+                vf.virtual_path = if prefix.is_empty() && vf.virtual_path.is_none() {
+                    None
+                } else if prefix.is_empty() {
+                    Some(clean.clone())
+                } else {
+                    Some(format!("{prefix}/{clean}"))
+                };
+                vf.name = clean;
+                changed = true;
+            }
+        }
+        let new_key = vf.virtual_path.clone().unwrap_or_else(|| vf.name.clone());
+        if new_key != old_key {
+            changed = true;
+        }
+        healed.insert(new_key, vf);
+    }
+    (healed, changed)
+}
 
 pub fn get_usenet_engine() -> Arc<UsenetEngineState> {
     USENET_ENGINE
@@ -113,25 +232,126 @@ pub fn get_usenet_engine() -> Arc<UsenetEngineState> {
                 .ok()
                 .and_then(|s| serde_json::from_str::<UsenetServerConfig>(&s).ok());
 
-            let initial_files: HashMap<String, VirtualFile> = std::fs::read_to_string(&mounts_path)
+            let loaded: HashMap<String, VirtualFile> = std::fs::read_to_string(&mounts_path)
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
+            let (initial_files, healed) = heal_persisted_mounts(loaded);
+            if healed {
+                if let Ok(json) = serde_json::to_string(&initial_files) {
+                    let _ = std::fs::write(&mounts_path, json);
+                }
+                log::info!(target: "usenet", "Auto-healed XML-escaped names in persisted NZB mounts");
+            }
             if !initial_files.is_empty() {
                 log::info!(target: "usenet", "Restored {} persisted NZB virtual files", initial_files.len());
             }
+
+            let cap = initial_conf
+                .as_ref()
+                .and_then(|c| c.connections_limit)
+                .unwrap_or(10)
+                .clamp(2, 20);
 
             let state = Arc::new(UsenetEngineState {
                 config: RwLock::new(initial_conf),
                 files: RwLock::new(initial_files),
                 config_path,
                 mounts_path,
+                conn_pool: Mutex::new(Vec::new()),
+                conn_sem: std::sync::RwLock::new(Arc::new(Semaphore::new(cap))),
+                pool_epoch: AtomicU64::new(0),
+                seg_cache: Mutex::new(VecDeque::with_capacity(SEGMENT_CACHE_CAPACITY)),
             });
 
             start_infinidysk_webdav_server(Arc::clone(&state));
             state
         })
         .clone()
+}
+
+impl UsenetEngineState {
+    pub fn epoch(&self) -> u64 {
+        self.pool_epoch.load(Ordering::SeqCst)
+    }
+
+    /// Wait (bounded) for a connection slot. Permit is owned, so it can live across awaits/tasks.
+    pub async fn acquire_slot(&self, wait_secs: u64) -> Option<OwnedSemaphorePermit> {
+        let sem = self.conn_sem.read().ok()?.clone();
+        match tokio::time::timeout(std::time::Duration::from_secs(wait_secs), sem.acquire_owned()).await {
+            Ok(Ok(p)) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub async fn get_cached_segment(&self, message_id: &str) -> Option<Arc<Vec<u8>>> {
+        let id = message_id.trim_matches(|c| c == '<' || c == '>');
+        let cache = self.seg_cache.lock().await;
+        cache.iter().find(|(k, _)| k.as_str() == id).map(|(_, v)| Arc::clone(v))
+    }
+
+    pub async fn put_cached_segment(&self, message_id: &str, data: Arc<Vec<u8>>) {
+        let id = message_id.trim_matches(|c| c == '<' || c == '>').to_string();
+        let mut cache = self.seg_cache.lock().await;
+        if let Some(pos) = cache.iter().position(|(k, _)| k == &id) {
+            cache.remove(pos);
+        }
+        while cache.len() >= SEGMENT_CACHE_CAPACITY {
+            cache.pop_front();
+        }
+        cache.push_back((id, data));
+    }
+
+    /// Pops an idle pooled connection or opens a new one. The caller must already
+    /// hold a `conn_sem` permit.
+    pub async fn acquire_conn(&self, cfg: &UsenetServerConfig) -> Result<NntpConn, String> {
+        let pooled = self.conn_pool.lock().await.pop();
+        if let Some(c) = pooled {
+            return Ok(c);
+        }
+        nntp_connect(cfg).await
+    }
+
+    /// Returns a HEALTHY connection to the idle pool (QUITs it if the pool is full).
+    pub async fn release_conn(&self, conn: NntpConn) {
+        let overflow = {
+            let mut pool = self.conn_pool.lock().await;
+            if pool.len() < POOL_MAX_IDLE {
+                pool.push(conn);
+                None
+            } else {
+                Some(conn)
+            }
+        };
+        if let Some(mut c) = overflow {
+            nntp_quit_quietly(&mut c).await;
+        }
+    }
+
+    /// Like `release_conn`, but drops (QUITs) the socket if the config changed since it was acquired.
+    pub async fn release_conn_at(&self, conn: NntpConn, epoch: u64) {
+        if epoch != self.epoch() {
+            let mut c = conn;
+            nntp_quit_quietly(&mut c).await;
+        } else {
+            self.release_conn(conn).await;
+        }
+    }
+
+    pub async fn clear_pool(&self) {
+        let conns: Vec<NntpConn> = self.conn_pool.lock().await.drain(..).collect();
+        for mut c in conns {
+            nntp_quit_quietly(&mut c).await;
+        }
+    }
+}
+
+async fn nntp_quit_quietly(conn: &mut NntpConn) {
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        let _ = conn.get_mut().write_all(b"QUIT\r\n").await;
+        let _ = conn.get_mut().flush().await;
+    })
+    .await;
 }
 
 async fn nntp_connect(cfg: &UsenetServerConfig) -> Result<BufReader<Box<dyn NntpIo>>, String> {
@@ -266,101 +486,205 @@ pub fn decode_yenc_article(raw_lines: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-async fn nntp_body(r: &mut BufReader<Box<dyn NntpIo>>, message_id: &str) -> Result<(Vec<u8>, Option<u64>, Option<u64>), String> {
+async fn nntp_body(
+    r: &mut NntpConn,
+    message_id: &str,
+) -> Result<(Vec<u8>, Option<u64>, Option<u64>), String> {
     let id = message_id.trim_matches(|c| c == '<' || c == '>');
-    r.get_mut().write_all(format!("BODY <{id}>\r\n").as_bytes()).await.map_err(|e| e.to_string())?;
-    r.get_mut().flush().await.map_err(|e| e.to_string())?;
-    let mut line = String::new();
-    r.read_line(&mut line).await.map_err(|e| e.to_string())?;
-    if !line.starts_with("222") {
-        return Err(format!("NNTP BODY failed: {}", line.trim()));
-    }
-    let mut raw = Vec::new();
-    loop {
-        let mut buf = Vec::new();
-        let n = r.read_until(b'\n', &mut buf).await.map_err(|e| e.to_string())?;
-        if n == 0 || buf == b".\r\n" || buf == b".\n" {
-            break;
+    let fut = async {
+        r.get_mut()
+            .write_all(format!("BODY <{id}>\r\n").as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        r.get_mut().flush().await.map_err(|e| e.to_string())?;
+        let mut line = String::new();
+        let n_hdr = r.read_line(&mut line).await.map_err(|e| e.to_string())?;
+        if n_hdr == 0 {
+            return Err("NNTP connection closed by server (EOF)".to_string());
         }
-        if buf.starts_with(b"..") {
-            buf.remove(0);
+        if !line.starts_with("222") {
+            return Err(format!("NNTP BODY failed: {}", line.trim()));
         }
-        raw.push(buf);
-    }
-    let total = raw.iter().find(|l| l.starts_with(b"=ybegin")).and_then(|l| {
-        let s = String::from_utf8_lossy(l);
-        s.split_whitespace().find_map(|t| t.strip_prefix("size=")?.parse::<u64>().ok())
-    });
-    let part_begin = raw.iter().find(|l| l.starts_with(b"=ypart")).and_then(|l| {
-        let s = String::from_utf8_lossy(l);
-        s.split_whitespace().find_map(|t| t.strip_prefix("begin=")?.parse::<u64>().ok())
-    });
-    Ok((decode_yenc_article(&raw), total, part_begin))
+        let mut raw: Vec<Vec<u8>> = Vec::new();
+        loop {
+            let mut buf = Vec::new();
+            let n = r.read_until(b'\n', &mut buf).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                return Err("Unexpected EOF while reading NNTP article body".to_string());
+            }
+            if buf == b".\r\n" || buf == b".\n" {
+                break;
+            }
+            if buf.starts_with(b"..") {
+                buf.remove(0);
+            }
+            raw.push(buf);
+        }
+        let total = raw.iter().find(|l| l.starts_with(b"=ybegin")).and_then(|l| {
+            let s = String::from_utf8_lossy(l);
+            s.split_whitespace().find_map(|t| t.strip_prefix("size=")?.parse::<u64>().ok())
+        });
+        let part_begin = raw.iter().find(|l| l.starts_with(b"=ypart")).and_then(|l| {
+            let s = String::from_utf8_lossy(l);
+            s.split_whitespace().find_map(|t| t.strip_prefix("begin=")?.parse::<u64>().ok())
+        });
+        Ok::<_, String>((decode_yenc_article(&raw), total, part_begin))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), fut)
+        .await
+        .map_err(|_| format!("NNTP BODY <{id}> timed out after 30s"))?
 }
 
-async fn fetch_segment_with_retry(
-    conn: &mut BufReader<Box<dyn NntpIo>>,
+/// Returns the decoded article. Cache first; on failure the connection is DROPPED
+/// (never reused/pooled) unless the server cleanly answered 430/423 (article missing),
+/// then retried once on a brand-new connection.
+/// `populate_cache`: true for playback reads, false for RAR header scanning
+/// (scanning would otherwise evict the segments playback needs).
+async fn fetch_segment(
+    engine: &UsenetEngineState,
+    cfg: &UsenetServerConfig,
+    conn: &mut Option<NntpConn>,
     seg: &NzbSegment,
-) -> Result<Vec<u8>, String> {
-    match nntp_body(conn, &seg.message_id).await {
-        Ok((d, _, _)) => Ok(d),
-        Err(first_err) => {
-            log::warn!(target: "usenet", "BODY retry for <{}>: {}", seg.message_id, first_err);
-            nntp_body(conn, &seg.message_id).await.map(|(d, _, _)| d)
+    populate_cache: bool,
+) -> Result<Arc<Vec<u8>>, String> {
+    if let Some(c) = engine.get_cached_segment(&seg.message_id).await {
+        return Ok(c);
+    }
+    let mut last_err = String::new();
+    for attempt in 0..2 {
+        if conn.is_none() {
+            *conn = Some(if attempt == 0 {
+                engine.acquire_conn(cfg).await?
+            } else {
+                nntp_connect(cfg).await?
+            });
+        }
+        match nntp_body(conn.as_mut().unwrap(), &seg.message_id).await {
+            Ok((d, _, _)) => {
+                let arc = Arc::new(d);
+                if populate_cache {
+                    engine.put_cached_segment(&seg.message_id, Arc::clone(&arc)).await;
+                }
+                return Ok(arc);
+            }
+            Err(e) => {
+                let missing = e.starts_with("NNTP BODY failed:") && (e.contains(" 430") || e.contains(" 423"));
+                log::warn!(target: "usenet", "BODY <{}> attempt {} failed: {}", seg.message_id, attempt + 1, e);
+                last_err = e;
+                if missing {
+                    break; // clean reply: socket still in sync, retrying cannot help
+                }
+                *conn = None; // possibly desynchronised: never reuse or pool it
+            }
         }
     }
+    Err(last_err)
 }
 
-async fn read_volume(conn: &mut BufReader<Box<dyn NntpIo>>, vol: &Volume, offset: u64, len: u64) -> Result<Vec<u8>, String> {
-    let end = offset.saturating_add(len).min(vol.size);
+/// Reads `offset..offset+len` of a volume and returns the bytes from `offset` to the END
+/// of the last fetched segment, so successive `rar::Step::Need` requests inside the same
+/// segment are served from memory instead of re-downloading it.
+async fn read_volume_generous(
+    engine: &UsenetEngineState,
+    cfg: &UsenetServerConfig,
+    conn: &mut Option<NntpConn>,
+    vol: &Volume,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>, String> {
+    let min_end = offset.saturating_add(len).min(vol.size);
     let mut out = Vec::new();
     let mut v_off = offset;
-    while v_off < end {
+    while v_off < min_end {
         let idx = (v_off / vol.seg_size) as usize;
         let seg = vol.segments.get(idx).ok_or("Segment index out of range")?;
-        let data = fetch_segment_with_retry(conn, seg).await
+        let data = fetch_segment(engine, cfg, conn, seg, false)
+            .await
             .map_err(|e| format!("Missing article <{}> while scanning {}: {}", seg.message_id, vol.name, e))?;
         let seg_start = idx as u64 * vol.seg_size;
         let a = (v_off - seg_start) as usize;
-        let b = ((end - seg_start) as usize).min(data.len());
-        if a >= b {
+        if a >= data.len() {
             break;
         }
-        out.extend_from_slice(&data[a..b]);
-        v_off = seg_start + b as u64;
+        out.extend_from_slice(&data[a..]);
+        v_off = seg_start + data.len() as u64;
     }
     Ok(out)
 }
 
-async fn scan_rar_volume(conn: &mut BufReader<Box<dyn NntpIo>>, vol: &Volume, password: Option<&str>) -> Result<(rar::Volume, Vec<rar::Entry>), String> {
+/// 0-based volume number inferred from conventional RAR names; `None` for obfuscated names.
+fn infer_rar_volume_number(name: &str) -> Option<u32> {
+    let l = name.to_ascii_lowercase();
+    if let Some(p) = l.rfind(".part") {
+        let digits: String = l[p + 5..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse::<u32>() {
+            return Some(n.saturating_sub(1));
+        }
+    }
+    if l.ends_with(".rar") {
+        return Some(0);
+    }
+    if regex_rnn(&l) {
+        return l[l.len() - 2..].parse::<u32>().ok().map(|n| n + 1);
+    }
+    None
+}
+
+/// Parses RAR headers of one volume starting from its already-downloaded first segment.
+/// Verified safe to skip the tail segment when the last entry's data already reaches the
+/// end of the volume AND the volume number is known (RAR5 header or filename): entry
+/// flags (`split_before/after`) come from the file header, not the end block.
+async fn scan_rar_volume_fast(
+    engine: &UsenetEngineState,
+    cfg: &UsenetServerConfig,
+    conn: &mut Option<NntpConn>,
+    vol: &Volume,
+    first_segment: Vec<u8>,
+    password: Option<&str>,
+) -> Result<(rar::Volume, Vec<rar::Entry>), String> {
     let mut scanner = rar::Scanner::new();
     let mut entries = Vec::new();
-    let (mut at, mut buf) = (0u64, Vec::new());
+    let (mut at, mut buf) = (0u64, first_segment);
+    let inferred = infer_rar_volume_number(&vol.name);
     loop {
         match scanner.next(at, &buf).map_err(|e| format!("{}: {e}", vol.name))? {
             rar::Step::Need { offset, len } => {
                 if offset >= vol.size {
                     break;
                 }
+                if !entries.is_empty()
+                    && offset + 64 >= vol.size
+                    && (scanner.volume().number.is_some() || inferred.is_some())
+                {
+                    break;
+                }
                 let have = buf.len() as u64;
                 if offset == at && (have >= len || at + have >= vol.size) {
                     return Err(format!("{}: RAR headers run past the end of the volume", vol.name));
                 }
-                buf = read_volume(conn, vol, offset, len).await?;
+                buf = read_volume_generous(engine, cfg, conn, vol, offset, len).await?;
                 at = offset;
             }
             rar::Step::Entry(e) => entries.push(e),
-            rar::Step::Key(_kdf) => {
+            rar::Step::Key(_) => {
                 return Err(format!(
                     "{}: archive is password-protected{}",
                     vol.name,
-                    if password.is_some() { " (encrypted archives not supported in v0.9.99)" } else { "; no password provided" }
+                    if password.is_some() {
+                        " (encrypted archives not supported)"
+                    } else {
+                        "; no password provided"
+                    }
                 ));
             }
             rar::Step::End { .. } => break,
         }
     }
-    Ok((scanner.volume().clone(), entries))
+    let mut v = scanner.volume().clone();
+    if v.number.is_none() {
+        v.number = inferred;
+    }
+    Ok((v, entries))
 }
 
 fn is_video_name(n: &str) -> bool {
@@ -546,7 +870,9 @@ fn rar_members_to_virtual(mut scans: Vec<(Volume, rar::Volume, Vec<rar::Entry>)>
 
 async fn stream_virtual_range(
     socket: &mut TcpStream,
-    conn: &mut BufReader<Box<dyn NntpIo>>,
+    engine: &UsenetEngineState,
+    cfg: &UsenetServerConfig,
+    conn: &mut Option<NntpConn>,
     vf: &VirtualFile,
     start: u64,
     end: u64,
@@ -563,28 +889,41 @@ async fn stream_virtual_range(
         }
         let lo = start.max(virt_pos) - virt_pos;
         let hi = (end + 1).min(part_end) - virt_pos;
-        let vol = &vf.volumes[part.volume];
+        let vol = vf.volumes.get(part.volume).ok_or("Volume index out of range")?;
         let (mut v_off, v_stop) = (part.vol_offset + lo, part.vol_offset + hi);
         while v_off < v_stop {
             let seg_idx = (v_off / vol.seg_size) as usize;
             let seg = vol.segments.get(seg_idx).ok_or("Segment index out of range")?;
-            let data = match fetch_segment_with_retry(conn, seg).await {
+            let seg_start = seg_idx as u64 * vol.seg_size;
+            let expected = vol.size.saturating_sub(seg_start).min(vol.seg_size) as usize;
+
+            let data = match fetch_segment(engine, cfg, conn, seg, true).await {
                 Ok(d) => d,
                 Err(e) => {
-                    log::error!(target: "usenet", "Article <{}> unrecoverable, zero-filling {} bytes: {}", seg.message_id, vol.seg_size, e);
-                    vec![0u8; vol.seg_size as usize]
+                    log::error!(target: "usenet", "Article <{}> unrecoverable, zero-filling {} bytes: {}", seg.message_id, expected, e);
+                    Arc::new(vec![0u8; expected.max(1)])
                 }
             };
-            let seg_start = seg_idx as u64 * vol.seg_size;
+
             let a = (v_off - seg_start) as usize;
-            let b = ((v_stop - seg_start) as usize).min(data.len());
-            if a >= b {
-                return Err("Short article".into());
+            // Never stop short because an article decoded a few bytes smaller than the
+            // nominal segment size: pad with zeros to keep byte offsets aligned.
+            let limit = ((v_stop - seg_start) as usize).min(expected.max(data.len()));
+            if a >= limit {
+                return Err("Offset beyond decoded article".into());
             }
-            if socket.write_all(&data[a..b]).await.is_err() {
-                return Ok(());
+            let real_end = data.len().min(limit);
+            if a < real_end && socket.write_all(&data[a..real_end]).await.is_err() {
+                return Ok(()); // client went away
             }
-            v_off = seg_start + b as u64;
+            let pad_from = a.max(real_end);
+            if limit > pad_from {
+                log::warn!(target: "usenet", "Short article <{}>: padding {} byte(s)", seg.message_id, limit - pad_from);
+                if socket.write_all(&vec![0u8; limit - pad_from]).await.is_err() {
+                    return Ok(());
+                }
+            }
+            v_off = seg_start + limit as u64;
         }
         virt_pos = part_end;
     }
@@ -777,19 +1116,44 @@ fn start_infinidysk_webdav_server(state: Arc<UsenetEngineState>) {
                         end - start + 1,
                         mime = mime_for_media_name(&vf.name)
                     );
-                    if socket.write_all(head.as_bytes()).await.is_err() {
-                        return;
-                    }
                     if method.eq_ignore_ascii_case("HEAD") {
+                        let _ = socket.write_all(head.as_bytes()).await;
                         return;
                     }
 
-                    let mut conn = match nntp_connect(&cfg).await {
-                        Ok(c) => c,
-                        Err(_) => return,
+                    // Get a connection slot + a live NNTP connection BEFORE promising 206:
+                    // on failure the client receives a real 5xx instead of an empty 206.
+                    let Some(_permit) = st.acquire_slot(12).await else {
+                        log::warn!(target: "usenet", "Timed out waiting for a free NNTP connection slot");
+                        let _ = socket
+                            .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 19\r\nConnection: close\r\n\r\nNNTP pool saturated")
+                            .await;
+                        return;
                     };
+                    let epoch = st.epoch();
+                    let first = match st.acquire_conn(&cfg).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            log::error!(target: "usenet", "WebDAV stream NNTP connect failed: {}", e);
+                            let _ = socket
+                                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 19\r\nConnection: close\r\n\r\nNNTP Connect Failed")
+                                .await;
+                            return;
+                        }
+                    };
+                    let mut conn: Option<NntpConn> = Some(first);
 
-                    let _ = stream_virtual_range(&mut socket, &mut conn, &vf, start, end).await;
+                    if socket.write_all(head.as_bytes()).await.is_err() {
+                        if let Some(c) = conn.take() {
+                            st.release_conn_at(c, epoch).await;
+                        }
+                        return;
+                    }
+
+                    let _ = stream_virtual_range(&mut socket, &st, &cfg, &mut conn, &vf, start, end).await;
+                    if let Some(c) = conn.take() {
+                        st.release_conn_at(c, epoch).await; // only healthy connections remain in `conn`
+                    }
                 });
             }
         }
@@ -838,7 +1202,15 @@ pub async fn usenet_save_config(config: UsenetServerConfig) -> Result<(), String
     let engine = get_usenet_engine();
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&engine.config_path, json).map_err(|e| e.to_string())?;
+    let new_cap = config.connections_limit.unwrap_or(10).clamp(2, 20);
     *engine.config.write().await = Some(config);
+    engine.pool_epoch.fetch_add(1, Ordering::SeqCst);
+    if let Ok(mut g) = engine.conn_sem.write() {
+        // New semaphore = new limit applies immediately (up OR down). Permits held by in-flight
+        // requests belong to the old semaphore; their stale sockets are dropped via release_conn_at.
+        *g = Arc::new(Semaphore::new(new_cap));
+    }
+    engine.clear_pool().await;
     Ok(())
 }
 
@@ -1034,6 +1406,10 @@ fn extract_attr(tag: &str, attr: &str) -> Option<String> {
     Some(tag[start..end].to_string())
 }
 
+fn probe_workers(limit: usize) -> usize {
+    limit.saturating_sub(2).clamp(1, 6)
+}
+
 #[tauri::command]
 pub async fn parse_nzb_media_files(
     nzb_xml: Option<String>,
@@ -1042,7 +1418,12 @@ pub async fn parse_nzb_media_files(
     virtual_dir: Option<String>,
 ) -> Result<Vec<PlayableFile>, String> {
     let engine = get_usenet_engine();
-    let cfg = engine.config.read().await.clone().ok_or("Usenet provider is not configured. Please configure it in Settings first.")?;
+    let cfg = engine
+        .config
+        .read()
+        .await
+        .clone()
+        .ok_or("Usenet provider is not configured. Please configure it in Settings first.")?;
 
     let nzb_content = match nzb_xml {
         Some(x) if !x.trim().is_empty() => x,
@@ -1053,7 +1434,14 @@ pub async fn parse_nzb_media_files(
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
                 .map_err(|e| e.to_string())?;
-            client.get(&u).send().await.map_err(|e| e.to_string())?.text().await.map_err(|e| e.to_string())?
+            client
+                .get(&u)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?
+                .text()
+                .await
+                .map_err(|e| e.to_string())?
         }
     };
 
@@ -1061,16 +1449,11 @@ pub async fn parse_nzb_media_files(
     for file_block in nzb_content.split("<file ").skip(1) {
         let end_file = file_block.find("</file>").unwrap_or(file_block.len());
         let block = &file_block[..end_file];
-        let subject = extract_attr(block, "subject").unwrap_or_default();
-        let filename = if let Some(q1) = subject.find('"') {
-            if let Some(q2) = subject[q1 + 1..].find('"') {
-                subject[q1 + 1..q1 + 1 + q2].to_string()
-            } else {
-                subject.clone()
-            }
-        } else {
-            subject.clone()
-        };
+        let raw_subject = extract_attr(block, "subject").unwrap_or_default();
+        let mut filename = extract_clean_subject_filename(&raw_subject);
+        if filename.is_empty() {
+            filename = xml_unescape(&raw_subject);
+        }
 
         let mut segments = Vec::new();
         for seg_block in block.split("<segment ").skip(1) {
@@ -1078,10 +1461,9 @@ pub async fn parse_nzb_media_files(
             let seg_str = &seg_block[..end_seg];
             let bytes = extract_attr(seg_str, "bytes").and_then(|b| b.parse::<u64>().ok()).unwrap_or(0);
             let number = extract_attr(seg_str, "number").and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
-            let msg_id = if let Some(start) = seg_str.find('>') {
-                seg_str[start + 1..].trim().to_string()
-            } else {
-                String::new()
+            let msg_id = match seg_str.find('>') {
+                Some(start) => xml_unescape(seg_str[start + 1..].trim()),
+                None => String::new(),
             };
             if !msg_id.is_empty() {
                 segments.push(NzbSegment { number, bytes, message_id: msg_id });
@@ -1097,39 +1479,37 @@ pub async fn parse_nzb_media_files(
         return Err("No usable segments found in NZB".to_string());
     }
 
-    // Drop known junk (.par2/.nfo/.sfv/samples/…) BEFORE touching the news server:
-    // these members are never playable and never RAR volumes, and a single missing
-    // .par2 article used to abort the whole mount.
-    let media_files: Vec<(String, Vec<NzbSegment>)> = raw_files
-        .into_iter()
-        .filter(|(name, _)| !is_junk_name(name))
-        .collect();
+    // Junk (.par2/.nfo/.sfv/samples…) is dropped BEFORE touching the news server.
+    let media_files: Vec<(String, Vec<NzbSegment>)> =
+        raw_files.into_iter().filter(|(name, _)| !is_junk_name(name)).collect();
     if media_files.is_empty() {
         return Err("Release contains only repair/metadata files (no media members)".to_string());
     }
 
-    // Probe segment[0] of each remaining member CONCURRENTLY over a small NNTP
-    // connection pool. The decoded first segment is genuinely required per volume:
-    // it yields the exact file size (yEnc =ybegin) and the decoded segment size that
-    // read_volume's offset math depends on — but it no longer has to happen one file
-    // at a time on one connection, and a member whose first article is missing (430)
-    // is skipped instead of failing the entire release.
-    let worker_count = cfg
-        .connections_limit
-        .unwrap_or(4)
-        .clamp(1, 8)
-        .min(media_files.len());
-    let queue = Arc::new(tokio::sync::Mutex::new(
-        media_files.into_iter().enumerate().collect::<std::collections::VecDeque<_>>(),
+    let total_conns = cfg.connections_limit.unwrap_or(6).clamp(1, 50);
+    let worker_count = probe_workers(total_conns).min(media_files.len());
+    let queue = Arc::new(Mutex::new(
+        media_files.into_iter().enumerate().collect::<VecDeque<_>>(),
     ));
+
+    type RarScan = Result<(rar::Volume, Vec<rar::Entry>), String>;
+    type Probed = (usize, Volume, Vec<u8>, Option<RarScan>);
+
     let mut handles = Vec::new();
     for _ in 0..worker_count {
         let queue = Arc::clone(&queue);
         let cfg = cfg.clone();
+        let eng = Arc::clone(&engine);
+        let pw = password.clone();
         handles.push(tauri::async_runtime::spawn(async move {
-            let mut out: Vec<(usize, Volume, Vec<u8>)> = Vec::new();
-            let mut conn = match nntp_connect(&cfg).await {
-                Ok(c) => c,
+            let mut out: Vec<Probed> = Vec::new();
+            let Some(_permit) = eng.acquire_slot(20).await else {
+                log::warn!(target: "usenet", "NZB probe worker: no free NNTP slot within 20s");
+                return out;
+            };
+            let epoch = eng.epoch();
+            let mut conn: Option<NntpConn> = match eng.acquire_conn(&cfg).await {
+                Ok(c) => Some(c),
                 Err(e) => {
                     log::warn!(target: "usenet", "NZB probe worker could not connect: {e}");
                     return out;
@@ -1138,26 +1518,73 @@ pub async fn parse_nzb_media_files(
             loop {
                 let item = { queue.lock().await.pop_front() };
                 let Some((idx, (name, segments))) = item else { break };
-                match nntp_body(&mut conn, &segments[0].message_id).await {
-                    Ok((first_data, total_size, _)) => {
-                        let seg_size = first_data.len() as u64;
-                        if seg_size == 0 {
-                            log::warn!(target: "usenet", "Empty first segment for {name}; skipping member");
-                            continue;
-                        }
-                        let total_bytes = total_size.unwrap_or(seg_size * segments.len() as u64);
-                        let magic = first_data[..first_data.len().min(16)].to_vec();
-                        out.push((idx, Volume { name, segments, size: total_bytes, seg_size }, magic));
+                let first_id = segments[0].message_id.clone();
+
+                // First article: gives exact size (=ybegin size=) and decoded segment size.
+                let mut got = None;
+                for attempt in 0..2 {
+                    if conn.is_none() {
+                        conn = if attempt == 0 {
+                            eng.acquire_conn(&cfg).await.ok()
+                        } else {
+                            nntp_connect(&cfg).await.ok()
+                        };
                     }
-                    Err(e) => {
-                        log::warn!(target: "usenet", "Skipping unreadable member {name}: {e}");
+                    let Some(c) = conn.as_mut() else { break };
+                    match nntp_body(c, &first_id).await {
+                        Ok(v) => {
+                            got = Some(v);
+                            break;
+                        }
+                        Err(e) => {
+                            log::warn!(target: "usenet", "Probe of {name} attempt {} failed: {e}", attempt + 1);
+                            let missing = e.starts_with("NNTP BODY failed:")
+                                && (e.contains(" 430") || e.contains(" 423"));
+                            if missing {
+                                break; // socket still valid
+                            }
+                            conn = None; // desynchronised: drop, reconnect on next attempt
+                        }
                     }
                 }
+                if conn.is_none() && got.is_none() {
+                    break; // cannot connect at all: let the other workers carry on
+                }
+                let Some((first_data, total_size, _)) = got else {
+                    log::warn!(target: "usenet", "Skipping unreadable member {name}");
+                    continue;
+                };
+
+                let seg_size = first_data.len() as u64;
+                if seg_size == 0 {
+                    log::warn!(target: "usenet", "Empty first segment for {name}; skipping member");
+                    continue;
+                }
+                // Only the first/video member's opening segment is worth keeping resident:
+                // it is exactly what the player requests first.
+                if idx == 0 || is_video_name(&name) {
+                    eng.put_cached_segment(&first_id, Arc::new(first_data.clone())).await;
+                }
+
+                let total_bytes = total_size.unwrap_or(seg_size * segments.len() as u64);
+                let magic = first_data[..first_data.len().min(16)].to_vec();
+                let vol = Volume { name, segments, size: total_bytes, seg_size };
+
+                let rar_scan = if rar_name(&vol.name) || magic_is_rar(&magic) {
+                    Some(scan_rar_volume_fast(&eng, &cfg, &mut conn, &vol, first_data, pw.as_deref()).await)
+                } else {
+                    None
+                };
+                out.push((idx, vol, magic, rar_scan));
+            }
+            if let Some(c) = conn.take() {
+                eng.release_conn_at(c, epoch).await;
             }
             out
         }));
     }
-    let mut probed: Vec<(usize, Volume, Vec<u8>)> = Vec::new();
+
+    let mut probed: Vec<Probed> = Vec::new();
     for h in handles {
         if let Ok(part) = h.await {
             probed.extend(part);
@@ -1166,37 +1593,47 @@ pub async fn parse_nzb_media_files(
     if probed.is_empty() {
         return Err("Could not read any media member of this release from the news server".to_string());
     }
-    probed.sort_by_key(|(idx, _, _)| *idx);
+    probed.sort_by_key(|p| p.0);
 
-    // RAR detection by extension OR magic bytes, so obfuscated releases (random-hash
-    // subjects with no extension) still mount.
-    let has_rar = probed.iter().any(|(_, v, m)| rar_name(&v.name) || magic_is_rar(m));
-    let mut virtual_files = Vec::new();
-
-    if has_rar {
-        let mut conn = nntp_connect(&cfg).await?;
-        let mut scans = Vec::new();
-        for (_, vol, magic) in &probed {
-            if !(rar_name(&vol.name) || magic_is_rar(magic)) {
-                continue;
-            }
-            if let Ok((header, entries)) = scan_rar_volume(&mut conn, vol, password.as_deref()).await {
-                scans.push((vol.clone(), header, entries));
-            }
+    let mut scans = Vec::new();
+    let mut rar_errors: Vec<String> = Vec::new();
+    for (_, vol, _, scan) in &probed {
+        match scan {
+            Some(Ok((header, entries))) => scans.push((vol.clone(), header.clone(), entries.clone())),
+            Some(Err(e)) => rar_errors.push(e.clone()),
+            None => {}
         }
-        if !scans.is_empty() {
-            if let Ok(vfs) = rar_members_to_virtual(scans) {
-                virtual_files.extend(vfs);
+    }
+
+    let mut virtual_files = Vec::new();
+    if !scans.is_empty() {
+        match rar_members_to_virtual(scans) {
+            Ok(vfs) => virtual_files.extend(vfs),
+            Err(e) => {
+                log::warn!(target: "usenet", "RAR assembly: {e}");
+                rar_errors.push(e);
             }
         }
     }
 
     if virtual_files.is_empty() {
-        for (_, vol, magic) in probed {
+        for (_, vol, magic, _) in probed {
             if is_video_name(&vol.name) || magic_is_video(&magic) {
                 let size = vol.size;
+                let mut name = vol.name.clone();
+                if !is_video_name(&name) {
+                    // obfuscated release: give the mount a playable extension from the magic bytes
+                    let ext = if magic.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+                        "mkv"
+                    } else if magic.starts_with(b"RIFF") {
+                        "avi"
+                    } else {
+                        "mp4"
+                    };
+                    name = format!("{name}.{ext}");
+                }
                 virtual_files.push(VirtualFile {
-                    name: vol.name.clone(),
+                    name,
                     size,
                     volumes: vec![vol],
                     parts: vec![Part { volume: 0, vol_offset: 0, len: size }],
@@ -1222,14 +1659,80 @@ pub async fn parse_nzb_media_files(
         let key = vp.unwrap_or_else(|| vf.name.clone());
         files_lock.insert(key, vf);
     }
-
+    if playables.is_empty() {
+        drop(files_lock);
+        return Err(rar_errors
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "No playable video members found in release".to_string()));
+    }
     if let Ok(json) = serde_json::to_string(&*files_lock) {
         let _ = std::fs::write(&engine.mounts_path, json);
     }
+    drop(files_lock);
 
-    if playables.is_empty() {
-        return Err("No playable video members found in release".to_string());
+    log::info!(
+        target: "usenet",
+        "Mounted {} playable virtual file(s): {}",
+        playables.len(),
+        playables.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+    );
+    Ok(playables)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unescape_entities() {
+        assert_eq!(xml_unescape("&quot;a&quot; &amp; &#34;b&#34; &#x41; &lt;&gt; &bogus;"), "\"a\" & \"b\" A <> &bogus;");
+        assert_eq!(xml_unescape("&amp;quot;"), "&quot;"); // no double-decode
     }
 
-    Ok(playables)
+    #[test]
+    fn subject_filename() {
+        assert_eq!(
+            extract_clean_subject_filename("TV Shows/X/&quot;Scrubs.S02E08.mkv&quot; yEnc (1/1444)"),
+            "Scrubs.S02E08.mkv"
+        );
+        assert_eq!(extract_clean_subject_filename("[7/7] - &quot;Abbott.mkv&quot; yEnc (1/1480)"), "Abbott.mkv");
+        assert_eq!(extract_clean_subject_filename("Some.Release.part01.rar yEnc (1/50)"), "Some.Release.part01.rar");
+    }
+
+    #[test]
+    fn heal_only_dirty_names() {
+        let mk = |name: &str, vp: Option<&str>| VirtualFile {
+            name: name.to_string(),
+            size: 1,
+            volumes: vec![],
+            parts: vec![],
+            virtual_path: vp.map(|s| s.to_string()),
+        };
+        let dirty = "&quot;A.mkv&quot; yEnc (1/9)";
+        let mut m = HashMap::new();
+        m.insert(format!("TV Shows/{dirty}"), mk(dirty, Some(&format!("TV Shows/{dirty}"))));
+        m.insert("Movies/Show \"Q\" 1.mkv".to_string(), mk("Show \"Q\" 1.mkv", Some("Movies/Show \"Q\" 1.mkv")));
+        let (h, changed) = heal_persisted_mounts(m);
+        assert!(changed);
+        assert!(h.contains_key("TV Shows/A.mkv"));
+        assert!(h.contains_key("Movies/Show \"Q\" 1.mkv")); // untouched
+    }
+
+    #[test]
+    fn rar_numbers() {
+        assert_eq!(infer_rar_volume_number("x.part01.rar"), Some(0));
+        assert_eq!(infer_rar_volume_number("x.part12.rar"), Some(11));
+        assert_eq!(infer_rar_volume_number("x.rar"), Some(0));
+        assert_eq!(infer_rar_volume_number("x.r00"), Some(1));
+        assert_eq!(infer_rar_volume_number("a1b2c3"), None);
+    }
+
+    #[test]
+    fn probe_workers_reserves_slots() {
+        assert_eq!(probe_workers(4), 2);
+        assert_eq!(probe_workers(2), 1);
+        assert_eq!(probe_workers(1), 1);
+        assert_eq!(probe_workers(20), 6);
+    }
 }

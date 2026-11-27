@@ -56,6 +56,14 @@ export const EXAMPLE_BOOKMARKS: SiteBookmark[] = [
     description: "High-definition subbed & dubbed anime simulcasts with multi-server HLS",
     searchPlaceholder: "Search anime title on Yomi.to...",
   },
+  {
+    id: "9anime",
+    title: "9anime",
+    url: "https://9anime.co.ke",
+    category: "anime",
+    description: "Subbed & dubbed anime, direct MP4 / HLS (works while Yomi.to is down)",
+    searchPlaceholder: "Search anime title on 9anime...",
+  },
 
   // Comics & Manga
   {
@@ -88,15 +96,6 @@ export const EXAMPLE_BOOKMARKS: SiteBookmark[] = [
   },
 
   // Adult (Portals & Search)
-  {
-    id: "balbums",
-    title: "Balbums (Bunkr Albums)",
-    url: "https://balbums.st",
-    category: "adult",
-    description: "Searchable directory of Bunkr media albums, leaks, and video archives",
-    searchPlaceholder: "Search albums, models, or tags on Balbums...",
-    bookmarkType: "site",
-  },
   {
     id: "sxyprn",
     title: "Sxyprn",

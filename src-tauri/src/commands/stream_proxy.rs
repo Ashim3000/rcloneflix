@@ -9,6 +9,9 @@ static PROXY_INIT: OnceCell<u16> = OnceCell::const_new();
 
 /// Infers the required Referer header for CDNs that restrict playback by referrer domain.
 pub fn infer_referer(target_url: &str) -> String {
+    if let Some(r) = crate::commands::nineanime::referer_for(target_url) {
+        return r;
+    }
     let lower = target_url.to_lowercase();
     if lower.contains("vidmoly") || lower.contains("vmpx.online") {
         "https://vidmoly.biz/".to_string()

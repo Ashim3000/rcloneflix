@@ -1878,8 +1878,33 @@ async function processSingleFile(
             });
           }
         }
-      } else if (library.type === "adult" && apiKeys.theporndb) {
-        meta = await fetchThePornDbMetadata(parsed.title, file.filename, apiKeys.theporndb);
+      } else if (library.type === "adult") {
+        if (apiKeys.theporndb) {
+          meta = await fetchThePornDbMetadata(parsed.title, file.filename, apiKeys.theporndb);
+        }
+        if (!meta.metadataId) {
+          const { stashBoxProviders } = useAppStore.getState();
+          const activeStash = (stashBoxProviders || []).find((p) => p.enabled && p.endpoint?.trim());
+          if (activeStash) {
+            const { parseAdultSceneFragment, searchScenesByFragment } = await import("./stashBox");
+            const fragment = parseAdultSceneFragment(file.filename);
+            const stashMatches = await searchScenesByFragment(activeStash, fragment);
+            const best = stashMatches[0];
+            if (best) {
+              const parsedYear = best.date ? parseInt(best.date.substring(0, 4), 10) : undefined;
+              meta = {
+                title: best.title,
+                posterUrl: best.posterUrl,
+                overview: best.details,
+                year: parsedYear && !isNaN(parsedYear) ? parsedYear : undefined,
+                genres: best.tags.length > 0 ? best.tags : undefined,
+                metadataId: best.id,
+                metadataSource: "stashbox",
+                metadataConfidence: "medium",
+              };
+            }
+          }
+        }
       }
     } catch {}
   }

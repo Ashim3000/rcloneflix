@@ -524,6 +524,15 @@ export function VideoPlayerPage() {
     });
   }, [useHtml5Video, navigate, location.state]);
 
+  const dismissUpNext = useCallback(() => {
+    hasDismissedUpNextRef.current = true;
+    setShowUpNext(false);
+    if (upNextTimerRef.current) {
+      clearInterval(upNextTimerRef.current);
+      upNextTimerRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     setShowUpNext(false);
     setUpNextCountdown(10);
@@ -572,8 +581,10 @@ export function VideoPlayerPage() {
     }
 
     if (nextEpisode) {
-      setShowUpNext(true);
-      setUpNextCountdown(10);
+      if (!hasDismissedUpNextRef.current && !psRef.current.error) {
+        setShowUpNext(true);
+        setUpNextCountdown(10);
+      }
     } else {
       // No next episode -> Cleanly navigate back to series page or library
       if (useHtml5Video && videoRef.current) {
@@ -2186,7 +2197,7 @@ export function VideoPlayerPage() {
 
       {/* Up Next / Auto-Advance Card Overlay */}
       <AnimatePresence>
-        {showUpNext && nextEpisode && !(isAndroid && isInPip) && (
+        {showUpNext && nextEpisode && !(isAndroid && isInPip) && !ps.error && (
           <motion.div
             initial={{ opacity: 0, y: 30, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -2200,10 +2211,7 @@ export function VideoPlayerPage() {
                 <span>Up Next in {upNextCountdown}s</span>
               </span>
               <button
-                onClick={() => {
-                  setShowUpNext(false);
-                  hasDismissedUpNextRef.current = true;
-                }}
+                onClick={dismissUpNext}
                 className="p-1 rounded-md text-subtle hover:text-white hover:bg-surface/50 transition-colors cursor-pointer"
                 title="Dismiss"
               >
@@ -2247,10 +2255,7 @@ export function VideoPlayerPage() {
                 <Play size={14} fill="currentColor" /> Play Now
               </button>
               <button
-                onClick={() => {
-                  setShowUpNext(false);
-                  hasDismissedUpNextRef.current = true;
-                }}
+                onClick={dismissUpNext}
                 className="btn-secondary text-xs py-2 px-3 text-subtle hover:text-white cursor-pointer"
               >
                 Dismiss

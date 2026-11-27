@@ -5,6 +5,13 @@
  */
 
 import packageJson from "../../package.json";
+import {
+  isNineAnimeUrl,
+  resolveNineAnimeWatch,
+  searchAndResolveForYomi,
+  crawlNineAnime,
+  type FetchText,
+} from "./nineAnime";
 
 type VirtualFileEntry = {
   name: string;
@@ -399,6 +406,11 @@ async function polyfillFetchText(
   }
 }
 
+const nineFetch: FetchText = async (url, headers = {}) => {
+  const r = await polyfillFetchText(url, headers);
+  return { ok: r.ok, body: r.body, url: r.url };
+};
+
 /** Android port of Rust search_comics_portal (stream_ingest.rs:4448):
  *  ReadComicsOnline autocomplete + Archive.org CBZ + MangaDex API. */
 async function searchComicsPortalAndroid(query: string): Promise<any> {
@@ -438,7 +450,7 @@ async function searchComicsPortalAndroid(query: string): Promise<any> {
   const iaTerm = cleanQ
     ? `title:(${cleanQ}) AND mediatype:texts AND (format:"Comic Book ZIP" OR subject:comics)`
     : `subject:(comics OR "comic book" OR marvel OR dc) AND format:(Comic Book ZIP)`;
-  const iaSort = cleanQ ? "downloads+desc" : "publicdate+desc";
+  const iaSort = "downloads+desc";
   const iaResp = await polyfillFetchText(
     `https://archive.org/advancedsearch.php?q=${encodeURIComponent(iaTerm)}&fl[]=identifier,title,year&sort[]=${iaSort}&rows=24&output=json`
   );
@@ -466,7 +478,7 @@ async function searchComicsPortalAndroid(query: string): Promise<any> {
   // 3. MangaDex Public API
   const mdUrl = cleanQ
     ? `https://api.mangadex.org/manga?title=${encodeURIComponent(cleanQ)}&limit=20&includes[]=cover_art&order[relevance]=desc`
-    : "https://api.mangadex.org/manga?limit=20&includes[]=cover_art&order[latestUploadedChapter]=desc&contentRating[]=safe&contentRating[]=suggestive";
+    : "https://api.mangadex.org/manga?limit=20&includes[]=cover_art&order[followedCount]=desc&contentRating[]=safe&contentRating[]=suggestive";
   const mdResp = await polyfillFetchText(mdUrl, { "User-Agent": `RcloneFlix/${packageJson.version}` });
   if (mdResp.ok && mdResp.body) {
     try {
@@ -3543,6 +3555,11 @@ sys.exit(0)
           };
         }
 
+        // 1b. 9anime (replacement for the dead yomi.to)
+        if (isNineAnimeUrl(siteUrl)) {
+          return await crawlNineAnime(siteUrl, nineFetch);
+        }
+
         // 2. Yomi.to Anime Discovery & Series Drilldown
         if (host.includes("yomi.to") || host.includes("yomi.run")) {
           const seriesMatch = siteUrl.match(/yomi\.(?:to|run)\/(?:anime|category|series)\/([^/?#]+)-(\d+)/i);
@@ -3821,48 +3838,10 @@ sys.exit(0)
           };
         }
 
-        // 8b. Balbums (Bunkr Albums Search Directory)
-        if (host.includes("balbums")) {
-          const resp = await polyfillFetchText(siteUrl, {
-            Referer: "https://balbums.st/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-          });
-          const releases: any[] = [];
-          const seen = new Set<string>();
-          const cardRe = /<a\s+href="([^"]*bunkr[^"]*\/a\/[^"]*)"[^>]*class="[^"]*card[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
-          let m: RegExpExecArray | null;
-          while ((m = cardRe.exec(resp.body)) !== null && releases.length < maxItems) {
-            const postUrl = m[1].trim();
-            if (seen.has(postUrl)) continue;
-            seen.add(postUrl);
-            const inner = m[2];
-            const titleMatch = inner.match(/<h3[^>]*>([^<]+)<\/h3>/i) || inner.match(/alt="([^"]+)"/i);
-            const countMatch = inner.match(/<span[^>]*>([0-9]+\s*files?)<\/span>/i);
-            const imgMatch = inner.match(/<img[^>]+src="([^"]+)"/i);
-            const titleStr = (titleMatch?.[1] || "Bunkr Album").trim();
-            const countStr = countMatch ? ` (${countMatch[1].trim()})` : "";
-            releases.push({
-              title: `${titleStr}${countStr}`,
-              post_url: postUrl,
-              thumbnail: imgMatch?.[1] || null,
-              date: null,
-              site_domain: "balbums.st",
-              media_type: "adult",
-              season: null,
-              episode: null,
-            });
-          }
-          return {
-            site_url: siteUrl,
-            site_title: "Balbums (Bunkr Albums)",
-            releases,
-          };
-        }
-
         // 8c. Bunkr Album Feed (Inside an Album)
         if ((host.includes("bunkr") || host.includes("bunkrr")) && siteUrl.includes("/a/")) {
           const resp = await polyfillFetchText(siteUrl, {
-            Referer: "https://balbums.st/",
+            Referer: parsedUrl.origin + "/",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
           });
           const origin = parsedUrl.origin;
@@ -4116,10 +4095,27 @@ sys.exit(0)
           }
         }
 
-        // 4. Yomi.to (`https://yomi.to/watch/{slug}-{anilistId}/{ep}`)
+        // 3b. 9anime watch / series URLs
+        if (isNineAnimeUrl(rawUrl) && /\/(?:watch|anime)\//i.test(rawUrl)) {
+          const watchUrl = /\/anime\//i.test(rawUrl)
+            ? rawUrl.replace(/\/anime\/([^/?#]+).*$/i, "/watch/$1-episode-1")
+            : rawUrl;
+          const r = await resolveNineAnimeWatch(watchUrl, nineFetch);
+          const stream = r.referer || /\.m3u8/i.test(r.file) ? buildProxyUrl(r.file, r.referer, /\.m3u8/i.test(r.file)) : r.file;
+          return wrapReturn(r.title, stream, r.dub ? "9anime (English Dub)" : "9anime (Subtitled)", "tv", false);
+        }
+
+        // 4. Yomi.to (`https://yomi.to/watch/{slug}-{anilistId}/{ep}`), falling back to 9anime when yomi is down
         if (lower.includes("yomi.to/watch/")) {
           const ym = rawUrl.match(/yomi\.to\/watch\/([^/?#]+)-(\d+)\/(\d+)/i);
           if (ym) {
+            try {
+              const r = await searchAndResolveForYomi(ym[1], Number(ym[3]), true, nineFetch);
+              const stream = r.referer || /\.m3u8/i.test(r.file) ? buildProxyUrl(r.file, r.referer, /\.m3u8/i.test(r.file)) : r.file;
+              return wrapReturn(r.title, stream, r.dub ? "9anime (English Dub)" : "9anime (Subtitled)", "tv", false);
+            } catch {
+              /* fall through to the CineXtream marker below */
+            }
             const cleanTitle = `${ym[1].replace(/-/g, " ")} Episode ${ym[3]}`;
             const marker = `cinextream://${ym[2]}/${ym[3]}`;
             return wrapReturn(cleanTitle, marker, "Yomi.to", "tv", false);

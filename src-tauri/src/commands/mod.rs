@@ -9,6 +9,7 @@ pub mod artwork;
 pub mod rclone_sync;
 pub mod download;
 pub mod stream_ingest;
+pub mod nineanime;
 pub mod vault_crypto;
 pub mod kaggle;
 pub mod iptv;

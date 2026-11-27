@@ -13,6 +13,47 @@ import { useCloudTranscodeStore } from "./kaggleTranscode";
 import { persistItems } from "./libraryDb";
 import { useToastStore } from "../store/toastStore";
 
+const EPHEMERAL_OR_VIRTUAL_PREFIXES = [
+  "streamtape:",
+  "telegram:",
+  "telegram-drive:",
+  "tg-native:",
+  "tg-serverless:",
+  "usenet-drive:",
+  "udrop:",
+  "web:",
+];
+
+export function isNonStandardRclonePath(path?: string | null): boolean {
+  if (!path) return true;
+  const lower = path.trim().toLowerCase();
+  return EPHEMERAL_OR_VIRTUAL_PREFIXES.some((p) => lower.startsWith(p));
+}
+
+/**
+ * Picks the first real rclone remote path from a library (ignoring streamtape:, telegram:,
+ * usenet-drive:, udrop:, web:). Falls back to any other library of matching type if needed.
+ */
+export function pickPreferredRcloneRoot(
+  preferredLib?: { remotePaths?: string[]; type?: string },
+  allLibraries: Array<{ remotePaths?: string[]; type?: string }> = []
+): string {
+  const fromPreferred = preferredLib?.remotePaths?.find((p) => !isNonStandardRclonePath(p));
+  if (fromPreferred) return fromPreferred.replace(/\/+$/, "");
+
+  const sameType = allLibraries.find(
+    (l) => l.type === preferredLib?.type && l.remotePaths?.some((p) => !isNonStandardRclonePath(p))
+  );
+  const fromSameType = sameType?.remotePaths?.find((p) => !isNonStandardRclonePath(p));
+  if (fromSameType) return fromSameType.replace(/\/+$/, "");
+
+  for (const lib of allLibraries) {
+    const anyReal = lib.remotePaths?.find((p) => !isNonStandardRclonePath(p));
+    if (anyReal) return anyReal.replace(/\/+$/, "");
+  }
+  return "";
+}
+
 /**
  * Injects Easynews HTTP Basic Auth credentials into a members.easynews.com download URL
  * so curl / ffmpeg / yt-dlp on local or cloud workers can authenticate directly.

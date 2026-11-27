@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Folder, Lock, RefreshCw, Key, Shield, AlertCircle, Play,
   Trash2, Plus, Edit2, X, Cloud, Eye, EyeOff, Save, Check, HardDrive, Share2, Compass,
@@ -6866,6 +6867,7 @@ function ExternalServersSettingsSection() {
 }
 
 function UsenetIndexerSettingsCard() {
+  const navigate = useNavigate();
   const addToast = useToastStore((s) => s.addToast);
   const rcloneConfigPath = useAppStore((s) => s.rcloneConfigPath);
   const isAndroid = typeof window !== "undefined" && (Boolean((window as any).AndroidBridge) || /android/i.test(navigator.userAgent));
@@ -7012,11 +7014,30 @@ function UsenetIndexerSettingsCard() {
         nzbUrl,
         nzbXml: null,
         password: null,
+        virtualDir: "Uncategorized",
       });
       if (playables && playables.length > 0) {
-        const file = playables[0];
+        const file = [...playables].sort((a, b) => (b.size || 0) - (a.size || 0))[0];
         const davPath = (file.virtual_path || file.name).split("/").map(encodeURIComponent).join("/");
-        window.location.href = `/player?url=${encodeURIComponent(`http://127.0.0.1:8553/dav/${davPath}`)}&title=${encodeURIComponent(file.name)}`;
+        const streamUrl = `http://127.0.0.1:8553/dav/${davPath}`;
+        const now = Date.now();
+        navigate("/play/video", {
+          state: {
+            item: {
+              id: `usenet-${now}`,
+              libraryId: "usenet",
+              libraryType: "movies",
+              title: file.name,
+              filename: file.name,
+              remotePath: streamUrl,
+              streamUrl,
+              sourceUrl: streamUrl,
+              addedAt: now,
+              lastScannedAt: now,
+              isSourceBookmark: true,
+            },
+          },
+        });
       } else {
         addToast("No playable media files found inside this NZB archive", "error");
       }

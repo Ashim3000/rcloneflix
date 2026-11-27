@@ -69,12 +69,12 @@ jobs:
                   f.write(rclone_snippet)
               print("Installed ephemeral rclone config snippet.")
 
-          def download_url_to_stage(url, dest_folder):
+          def download_url_to_stage(url, dest_folder, dest_filename=None):
               os.makedirs(dest_folder, exist_ok=True)
               parsed_u = urlparse(url)
               origin_ref = f"{parsed_u.scheme}://{parsed_u.netloc}/" if parsed_u.scheme and parsed_u.netloc else url
               ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-              fn = os.path.basename(unquote(parsed_u.path))
+              fn = os.path.basename(dest_filename.strip()) if dest_filename and dest_filename.strip() else os.path.basename(unquote(parsed_u.path))
               if not fn or len(fn) < 3 or "." not in fn:
                   fn = f"cloud_transfer_{int(time.time())}.mp4"
               dest_path = os.path.join(dest_folder, fn)
@@ -261,7 +261,7 @@ jobs:
 
                   partial_stage_err = False
                   if is_source_url:
-                      download_url_to_stage(source, stage_dir)
+                      download_url_to_stage(source, stage_dir, (payload.get("dest_filename") or "").strip() or None)
                   else:
                       stage_cmd = ["rclone", "copy", source, stage_dir, "-v", "--stats", "10s", "--retries", "5", "--retries-sleep", "5s"]
                       apply_batch_filter(stage_cmd, batch_items, source)
@@ -367,7 +367,7 @@ jobs:
                   stage_dir = "/tmp/stage_streamtape_transfers"
                   os.makedirs(stage_dir, exist_ok=True)
                   if is_source_url:
-                      download_url_to_stage(source, stage_dir)
+                      download_url_to_stage(source, stage_dir, (payload.get("dest_filename") or "").strip() or None)
                   elif is_source_telegram:
                       stage_from_telegram_mtproto(payload.get("telegram_source_items") or [], stage_dir, tg_api_id, tg_api_hash, tg_token, tg_chat_id)
                   else:
@@ -402,7 +402,7 @@ jobs:
 
               elif is_source_url:
                   stage_dir = "/tmp/stage_url_transfers"
-                  local_fp = download_url_to_stage(source, stage_dir)
+                  local_fp = download_url_to_stage(source, stage_dir, (payload.get("dest_filename") or "").strip() or None)
                   cmd = ["rclone", "copy", local_fp, dest, "-v", "--stats", "10s"]
                   print(f"Uploading staged Web URL file to {dest}: {' '.join(cmd)}")
                   subprocess.run(cmd, check=True)

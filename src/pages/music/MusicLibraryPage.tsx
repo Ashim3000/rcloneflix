@@ -4,7 +4,8 @@ import { TagFilterStrip } from "../../components/common/TagFilterStrip";
 import { UserTagsEditor } from "../../components/common/UserTagsEditor";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { motion } from "framer-motion";
-import { ChevronLeft, Search, Music, Disc3, Clock, RefreshCw, Play, Download, Sparkles, SortAsc, Cloud, Check, Loader2, AlertCircle, BookOpen, X } from "lucide-react";
+import { ChevronLeft, Search, Music, Disc3, Clock, RefreshCw, Play, Download, Sparkles, SortAsc, Cloud, Check, Loader2, AlertCircle, BookOpen, X, Compass } from "lucide-react";
+import { MusicDiscoverPanel } from "../../components/music/MusicDiscoverPanel";
 import {
   useAppStore,
   selectMusicArtists,
@@ -53,6 +54,7 @@ export function MusicLibraryPage() {
   const { libraries, mediaItems, tmdbApiKey, thePornDbApiKey, scanState, setMusicSkinMode, rcloneConfigPath } = useAppStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [view, setView] = useState<View>("artists");
+  const [mode, setMode] = useState<"library" | "discover">("library");
   const [sort, setSort] = useState<MusicSortKey>(() => {
     return (localStorage.getItem("rcloneflix_sort_music") as MusicSortKey) || "name";
   });
@@ -314,6 +316,20 @@ export function MusicLibraryPage() {
           </div>
           {library && (
             <div className="flex items-center gap-2">
+              {view === "artists" && (
+                <button
+                  onClick={() => setMode((m) => (m === "discover" ? "library" : "discover"))}
+                  title="Discover new music based on your library"
+                  className={`px-3 py-2 rounded-lg border font-body font-semibold text-xs transition-all flex items-center gap-1.5 ${
+                    mode === "discover"
+                      ? "bg-accent text-void border-accent"
+                      : "bg-accent/15 hover:bg-accent/30 text-accent border-accent/30"
+                  }`}
+                >
+                  <Compass size={14} />
+                  <span>{mode === "discover" ? "Back to Library" : "Discover"}</span>
+                </button>
+              )}
               <button
                 onClick={() => setMusicSkinMode(true)}
                 title="Switch to Compact Music Player Skin (Plexamp / Winamp Mode)"
@@ -373,7 +389,13 @@ export function MusicLibraryPage() {
           </div>
         )}
 
-        {library && (
+        {library && mode === "discover" && (
+          <div className="px-8">
+            <MusicDiscoverPanel artists={artists} libraries={musicLibraries} />
+          </div>
+        )}
+
+        {library && mode === "library" && (
           <div className="px-8">
             {/* Breadcrumb */}
             {view !== "artists" && breadcrumb}

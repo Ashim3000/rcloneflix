@@ -18,6 +18,7 @@ type Props = {
   onClose: () => void;
   initialQuery?: string;
   item?: MediaItem | null;
+  defaultLibraryType?: string;
 };
 
 type UsenetSearchResult = {
@@ -70,6 +71,7 @@ export function InfiniDyskSearchModal({
   onClose,
   initialQuery = "",
   item,
+  defaultLibraryType,
 }: Props) {
   const navigate = useNavigate();
   const addToast = useToastStore((s) => s.addToast);
@@ -87,7 +89,7 @@ export function InfiniDyskSearchModal({
   const [transferTarget, setTransferTarget] = useState<{ url: string; title: string } | null>(null);
   const [transcodeTarget, setTranscodeTarget] = useState<{ url: string; title: string } | null>(null);
   const [activeMenuUrl, setActiveMenuUrl] = useState<string | null>(null);
-  const [categoryOverride, setCategoryOverride] = useState<string>(item?.libraryType || "uncategorized");
+  const [categoryOverride, setCategoryOverride] = useState<string>(item?.libraryType || defaultLibraryType || "uncategorized");
 
   const resolvedCategoryType = item?.libraryType || (categoryOverride === "uncategorized" ? null : categoryOverride);
 
@@ -540,7 +542,15 @@ export function InfiniDyskSearchModal({
                                             isSourceBookmark: true,
                                           };
                                           onClose();
-                                          navigate(f.kind === "audio" ? "/play/audio" : "/play/video", { state: { item: playItem } });
+                                          if (f.kind === "audio") {
+                                            window.dispatchEvent(
+                                              new CustomEvent("rcloneflix:play-audio", {
+                                                detail: { playlist: [playItem], playlistIndex: 0 },
+                                              })
+                                            );
+                                          } else {
+                                            navigate("/play/video", { state: { item: playItem } });
+                                          }
                                         }}
                                         className="p-1.5 rounded-lg bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30 cursor-pointer"
                                         title="Play this file"

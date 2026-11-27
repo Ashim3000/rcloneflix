@@ -58,7 +58,7 @@ export function TvShowPage() {
   const showId = params.showId || params["*"];
   const location = useLocation();
   const navigate = useNavigate();
-  const { mediaItems, watchProgress, markMultipleCompleted, tvSubscriptions, upsertTvSubscription, removeTvSubscription } = useAppStore();
+  const { mediaItems, watchProgress, markMultipleCompleted, tvSubscriptions, upsertTvSubscription, removeTvSubscription, libraries } = useAppStore();
 
   const show = useMemo(() => {
     const locShow = location.state?.show as TvShow | undefined;
@@ -97,18 +97,32 @@ export function TvShowPage() {
   }, [show]);
 
   const inferredSeriesFolderPath = useMemo(() => {
+    const isEphemeralRemote = (p: string) =>
+      /^(?:shared_)?(?:streamtape|dropmb|catbox|doodstream):/i.test(p.trim());
+
     const rp = firstEpisode?.remotePath || "";
-    if (!rp) return "";
-    const lastSlash = rp.lastIndexOf("/");
-    if (lastSlash === -1) return "";
-    const parent = rp.slice(0, lastSlash);
-    // If parent ends in "/Season X", go one level up to the series root folder
-    if (/\/season\s*\d+$/i.test(parent)) {
-      const grandSlash = parent.lastIndexOf("/");
-      if (grandSlash !== -1) return parent.slice(0, grandSlash);
+    if (rp && !isEphemeralRemote(rp)) {
+      const lastSlash = rp.lastIndexOf("/");
+      if (lastSlash !== -1) {
+        const parent = rp.slice(0, lastSlash);
+        // If parent ends in "/Season X", go one level up to the series root folder
+        if (/\/season\s*\d+$/i.test(parent)) {
+          const grandSlash = parent.lastIndexOf("/");
+          if (grandSlash !== -1) return parent.slice(0, grandSlash);
+        }
+        return parent;
+      }
     }
-    return parent;
-  }, [firstEpisode]);
+    const tvLib =
+      libraries.find((l) => l.id === show?.libraryId && !l.isSharedPass && l.remotePaths.some((p) => !isEphemeralRemote(p))) ||
+      libraries.find((l) => l.type === "tv" && !l.isSharedPass && l.remotePaths.some((p) => !isEphemeralRemote(p)));
+    const base = tvLib?.remotePaths.find((p) => !isEphemeralRemote(p))?.replace(/\/+$/, "");
+    if (base && show?.title) {
+      const safeTitle = show.title.replace(/[/\\?%*:|"<>]/g, "").trim();
+      return `${base}/${safeTitle}`;
+    }
+    return "";
+  }, [firstEpisode, libraries, show?.libraryId, show?.title]);
 
   useEffect(() => {
     if (!show?.title) return;

@@ -174,8 +174,11 @@ export function MediaDetailPage() {
 
   const resolvedTvDestPath = useMemo(() => {
     if (!isTvItem) return "";
+    const isEphemeralRemote = (p: string) =>
+      /^(?:shared_)?(?:streamtape|dropmb|catbox|doodstream):/i.test(p.trim());
+
     const rp = item.remotePath || "";
-    if (rp && rp.includes(":")) {
+    if (rp && rp.includes(":") && !isEphemeralRemote(rp)) {
       const lastSlash = rp.lastIndexOf("/");
       if (lastSlash !== -1) {
         const parent = rp.slice(0, lastSlash);
@@ -186,14 +189,16 @@ export function MediaDetailPage() {
         return parent;
       }
     }
-    const tvLib = libraries.find((l) => l.type === "tv" && !l.isSharedPass && l.remotePaths.length > 0);
-    if (tvLib) {
-      const base = tvLib.remotePaths[0].replace(/\/+$/, "");
+    const tvLib =
+      libraries.find((l) => l.id === item.libraryId && !l.isSharedPass && l.remotePaths.some((p) => !isEphemeralRemote(p))) ||
+      libraries.find((l) => l.type === "tv" && !l.isSharedPass && l.remotePaths.some((p) => !isEphemeralRemote(p)));
+    const base = tvLib?.remotePaths.find((p) => !isEphemeralRemote(p))?.replace(/\/+$/, "");
+    if (base) {
       const safeTitle = seriesTitle.replace(/[/\\?%*:|"<>]/g, "").trim();
       return `${base}/${safeTitle}`;
     }
     return "";
-  }, [isTvItem, item.remotePath, libraries, seriesTitle]);
+  }, [isTvItem, item.remotePath, item.libraryId, libraries, seriesTitle]);
 
   useEffect(() => {
     if (!item.title || isBookOrAudio) {

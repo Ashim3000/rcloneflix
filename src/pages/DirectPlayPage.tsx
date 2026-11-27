@@ -218,9 +218,9 @@ export function DirectPlayPage() {
         feed = await crawlWebsiteReleases(
           `https://yomi.to/browse?query=${encodeURIComponent(q)}`
         );
-      } else if (activeSearchBookmark.id === "balbums") {
+      } else if (activeSearchBookmark.id === "9anime") {
         feed = await crawlWebsiteReleases(
-          `https://balbums.st/?search=${encodeURIComponent(q.trim())}&mode=broad&sort=latest`
+          `https://9anime.co.ke/search?keyword=${encodeURIComponent(q.trim())}`
         );
       } else if (activeSearchBookmark.id === "sxyprn") {
         const tag = encodeURIComponent(q.trim().replace(/\s+/g, "-"));
@@ -710,7 +710,7 @@ export function DirectPlayPage() {
                   onClick={() => setAdultHidden(false)}
                   className="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-pink-500/10 border border-pink-500/30 text-pink-300 hover:bg-pink-500/20 whitespace-nowrap transition-colors"
                 >
-                  Show Adult Portals (Balbums)
+                  Show Adult Portals
                 </button>
               )}
             </div>
@@ -935,8 +935,8 @@ export function DirectPlayPage() {
               void handleCrawl(`https://baddieseast.com.co/search/${encodeURIComponent(q)}`);
             } else if (currentUrl.includes("yomi")) {
               void handleCrawl(`https://yomi.to/browse?query=${encodeURIComponent(q)}`);
-            } else if (currentUrl.includes("balbums")) {
-              void handleCrawl(`https://balbums.st/?search=${encodeURIComponent(q.trim())}&mode=broad&sort=latest`);
+            } else if (currentUrl.includes("9anime")) {
+              void handleCrawl(`https://9anime.co.ke/search?keyword=${encodeURIComponent(q.trim())}`);
             } else if (currentUrl.includes("sxyprn")) {
               const tag = encodeURIComponent(q.trim().replace(/\s+/g, "-"));
               void handleCrawl(`https://www.sxyprn.com/${tag}.html`);

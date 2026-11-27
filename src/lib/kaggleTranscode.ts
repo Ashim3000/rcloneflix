@@ -4,6 +4,7 @@ import { persist } from "zustand/middleware";
 import { useAppStore, type MediaItem } from "../store/appStore";
 import { persistItems } from "./libraryDb";
 import { useToastStore } from "../store/toastStore";
+import { normalizeWorkerLog } from "./workerLog";
 
 export type KaggleCredentials = {
   username: string;
@@ -134,7 +135,7 @@ export async function getKaggleTranscodeStatus(
 export async function getKaggleTranscodeOutput(
   kernelSlug: string
 ): Promise<string> {
-  return invoke<string>("get_kaggle_transcode_output", { kernelSlug });
+  return normalizeWorkerLog(await invoke<string>("get_kaggle_transcode_output", { kernelSlug }));
 }
 
 interface CloudTranscodeStore {

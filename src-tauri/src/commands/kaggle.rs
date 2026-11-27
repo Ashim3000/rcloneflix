@@ -46,6 +46,8 @@ pub struct KaggleTransferRequest {
     pub source: String,
     pub destination: String,
     pub batch_items: Option<Vec<String>>,
+    #[serde(default)]
+    pub dest_filename: Option<String>,
     pub transfers: Option<u32>,
     pub checkers: Option<u32>,
     pub drive_server_side_copy: Option<bool>,
@@ -1097,6 +1099,7 @@ fn generate_transfer_script(
     let st_login = req.streamtape_api_login.as_deref().unwrap_or("");
     let st_key = req.streamtape_api_key.as_deref().unwrap_or("");
     let st_folder = String::new();
+    let dest_filename = req.dest_filename.clone().unwrap_or_default().replace('"', "").replace('\\', "");
 
     // Format filter rules if batch items provided
     let (filter_setup, has_batch_filter) = if let Some(items) = &req.batch_items {
@@ -1184,6 +1187,7 @@ with open(rclone_conf_path, "w", encoding="utf-8") as f:
 
 # 2. SETUP PARAMETERS
 SOURCE = r"""{source}"""
+DEST_FILENAME = r"""{dest_filename}"""
 DESTINATION = r"""{destination}"""
 OPERATION = "{operation}"
 TRANSFERS = {transfers}
@@ -1238,7 +1242,7 @@ def download_url_to_stage(url, dest_folder):
     parsed_u = urlparse(url)
     origin_ref = f"{{parsed_u.scheme}}://{{parsed_u.netloc}}/" if parsed_u.scheme and parsed_u.netloc else url
     ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    fn = os.path.basename(unquote(parsed_u.path))
+    fn = os.path.basename((DEST_FILENAME or "").strip()) or os.path.basename(unquote(parsed_u.path))
     if not fn or len(fn) < 3 or "." not in fn:
         fn = f"cloud_transfer_{{int(time.time())}}.mp4"
     dest_path = os.path.join(dest_folder, fn)
@@ -1780,6 +1784,7 @@ else:
         b64_conf = b64_conf,
         operation = operation,
         source = req.source.trim(),
+        dest_filename = dest_filename,
         destination = req.destination.trim(),
         transfers = transfers,
         checkers = checkers,

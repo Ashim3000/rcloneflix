@@ -783,7 +783,9 @@ async fn extract_yomi(url: &str, _client: &reqwest::Client) -> Result<WebStreamI
     let ep_num: Option<u32> = ep.parse().ok();
 
     // 1. Primary: CineXtream clean unencrypted HLS stream (prefer English Dub)
-    if let Ok((direct_m3u8, cat)) = resolve_cinextream(&ani_id, &ep).await {
+    if let Ok(Ok((direct_m3u8, cat))) =
+        tokio::time::timeout(Duration::from_secs(6), resolve_cinextream(&ani_id, &ep)).await
+    {
         let provider_label = if cat == "dub" {
             "Yomi.to (English Dub)".to_string()
         } else {
@@ -810,6 +812,14 @@ async fn extract_yomi(url: &str, _client: &reqwest::Client) -> Result<WebStreamI
             season: Some(1),
             episode: ep_num,
         });
+    }
+
+    // 1b. yomi.to / cinextream unreachable → find the same show on 9anime (English Dub preferred, like step 1).
+    if let Ok(mut info) =
+        crate::commands::nineanime::search_and_resolve_for_yomi(&slug, ep_num.unwrap_or(1), true).await
+    {
+        info.original_url = url.to_string();
+        return Ok(info);
     }
 
     // 2. Fallback when local Node.js is unavailable (e.g. standard Windows installations):
@@ -1939,6 +1949,16 @@ pub async fn fetch_web_stream_info(url: String) -> Result<WebStreamInfo, String>
         let ep1_url = trimmed.replace("/category/", "/").trim_end_matches('/').to_string() + "-episode-1";
         if let Ok(ep_info) = Box::pin(fetch_web_stream_info(ep1_url)).await {
             return Ok(ep_info);
+        }
+    }
+
+    // 4b'. 9anime (replacement for the dead yomi.to)
+    if crate::commands::nineanime::is_nineanime_url(&trimmed) {
+        if trimmed.contains("/watch/") {
+            return crate::commands::nineanime::extract_nineanime(&trimmed).await;
+        }
+        if let Some(w) = crate::commands::nineanime::watch_url_for_series(&trimmed) {
+            return crate::commands::nineanime::extract_nineanime(&w).await;
         }
     }
 
@@ -3230,81 +3250,15 @@ async fn fetch_yomi_search_catalog(
     })
 }
 
-async fn crawl_balbums(url: &str, client: &reqwest::Client) -> Result<SiteDiscoveryFeed, String> {
-    let resp = client
-        .get(url)
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36")
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch Balbums page: {}", e))?;
-
-    let html = resp.text().await.map_err(|e| format!("Failed to read Balbums response: {}", e))?;
-
-    let card_re = Regex::new(r#"(?s)<a\s+href="([^"]*bunkr[^"]*/a/[^"]*)"[^>]*class="[^"]*card[^"]*"[^>]*>(.*?)</a>"#)
-        .map_err(|e| e.to_string())?;
-    let img_re = Regex::new(r#"<img[^>]+src="([^"]+)""#).map_err(|e| e.to_string())?;
-    let alt_re = Regex::new(r#"alt="([^"]+)""#).map_err(|e| e.to_string())?;
-    let title_re = Regex::new(r#"<h3[^>]*>([^<]+)</h3>"#).map_err(|e| e.to_string())?;
-    let count_re = Regex::new(r#"<span[^>]*>([0-9]+\s*files?)</span>"#).map_err(|e| e.to_string())?;
-
-    let mut releases = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    for cap in card_re.captures_iter(&html) {
-        let post_url = cap[1].trim().to_string();
-        if seen.contains(&post_url) {
-            continue;
-        }
-        seen.insert(post_url.clone());
-        let inner = &cap[2];
-
-        let title_raw = title_re
-            .captures(inner)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str().trim().to_string())
-            .or_else(|| {
-                alt_re
-                    .captures(inner)
-                    .and_then(|c| c.get(1))
-                    .map(|m| m.as_str().trim().to_string())
-            })
-            .unwrap_or_else(|| "Bunkr Album".to_string());
-
-        let file_count = count_re
-            .captures(inner)
-            .and_then(|c| c.get(1))
-            .map(|m| format!(" ({})", m.as_str().trim()))
-            .unwrap_or_default();
-
-        let thumbnail = img_re
-            .captures(inner)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str().trim().to_string());
-
-        releases.push(DiscoveredRelease {
-            title: format!("{}{}", title_raw, file_count),
-            post_url,
-            thumbnail,
-            date: None,
-            site_domain: "balbums.st".to_string(),
-            media_type: "adult".to_string(),
-            season: None,
-            episode: None,
-        });
-    }
-
-    Ok(SiteDiscoveryFeed {
-        site_url: url.to_string(),
-        site_title: "Balbums (Bunkr Albums)".to_string(),
-        releases,
-    })
-}
-
 async fn crawl_bunkr_album(url: &str, client: &reqwest::Client) -> Result<SiteDiscoveryFeed, String> {
+    let album_origin = reqwest::Url::parse(url)
+        .ok()
+        .map(|u| format!("{}://{}/", u.scheme(), u.host_str().unwrap_or("bunkr.cr")))
+        .unwrap_or_else(|| "https://bunkr.cr/".to_string());
     let resp = client
         .get(url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36")
-        .header("Referer", "https://balbums.st/")
+        .header("Referer", album_origin.as_str())
         .send()
         .await
         .map_err(|e| format!("Failed to fetch Bunkr album: {}", e))?;
@@ -3638,6 +3592,11 @@ pub async fn crawl_website_releases(url: String) -> Result<SiteDiscoveryFeed, St
         return crawl_comics_portal(&trimmed, &client).await;
     }
 
+    // 0a'. 9anime discovery (search / series / episode list / latest)
+    if crate::commands::nineanime::is_nineanime_url(&trimmed) {
+        return crate::commands::nineanime::crawl_nineanime_feed(&trimmed).await;
+    }
+
     // 0b. Yomi.to Dedicated Discovery & Series Hierarchy Crawler
     if host.contains("yomi.to") {
         return crawl_yomi_feed(&trimmed, &parsed_url, &client).await;
@@ -3651,11 +3610,6 @@ pub async fn crawl_website_releases(url: String) -> Result<SiteDiscoveryFeed, St
     // 0e. Pixeldrain List / Album Deep Crawler
     if host.contains("pixeldrain.com") && trimmed.contains("/l/") {
         return crawl_pixeldrain_list(&trimmed, &client).await;
-    }
-
-    // 0e-balbums. Balbums Search & Bunkr Album Crawler
-    if host.contains("balbums") {
-        return crawl_balbums(&trimmed, &client).await;
     }
 
     if (host.contains("bunkr") || host.contains("bunkrr")) && trimmed.contains("/a/") {
@@ -3915,6 +3869,9 @@ pub async fn crawl_website_releases(url: String) -> Result<SiteDiscoveryFeed, St
 #[tauri::command]
 pub async fn resolve_web_stream_url(url: String) -> Result<String, String> {
     let trimmed = url.trim().to_string();
+    if trimmed.starts_with("http://127.0.0.1:") || trimmed.starts_with("http://localhost:") {
+        return Ok(trimmed);
+    }
     info!(target: "stream", "resolve_web_stream_url requested for: {}", trimmed);
 
     // 1. YouTube direct stream resolution via local yt-dlp
@@ -3968,6 +3925,7 @@ pub async fn resolve_web_stream_url(url: String) -> Result<String, String> {
             && !stream.starts_with("cinextream://")
             && (
             lower.contains(".m3u8")
+                || crate::commands::nineanime::referer_for(&stream).is_some()
                 || lower.contains("vidmoly")
                 || lower.contains("saturn.")
                 || lower.contains("jupiter.")
@@ -4543,7 +4501,7 @@ pub async fn search_comics_portal(query: Option<String>) -> Result<SiteDiscovery
         )
     };
     let enc_ia = percent_encoding::utf8_percent_encode(&ia_term, percent_encoding::NON_ALPHANUMERIC).to_string();
-    let ia_sort = if clean_q.is_empty() { "publicdate+desc" } else { "downloads+desc" };
+    let ia_sort = "downloads+desc";
     let ia_url = format!(
         "https://archive.org/advancedsearch.php?q={}&fl[]=identifier,title,year&sort[]={}&rows=24&output=json",
         enc_ia, ia_sort
@@ -4585,7 +4543,7 @@ pub async fn search_comics_portal(query: Option<String>) -> Result<SiteDiscovery
     // 3. Query MangaDex Public API for Comics & Manga series
     let enc_md_q = percent_encoding::utf8_percent_encode(&clean_q, percent_encoding::NON_ALPHANUMERIC).to_string();
     let md_url = if clean_q.is_empty() {
-        "https://api.mangadex.org/manga?limit=20&includes[]=cover_art&order[latestUploadedChapter]=desc&contentRating[]=safe&contentRating[]=suggestive".to_string()
+        "https://api.mangadex.org/manga?limit=20&includes[]=cover_art&order[followedCount]=desc&contentRating[]=safe&contentRating[]=suggestive".to_string()
     } else {
         format!(
             "https://api.mangadex.org/manga?title={}&limit=20&includes[]=cover_art&order[relevance]=desc",

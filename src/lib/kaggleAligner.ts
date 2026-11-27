@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { useToastStore } from "../store/toastStore";
+import { normalizeWorkerLog } from "./workerLog";
 import type { KaggleDispatchResult, KaggleKernelStatus } from "./kaggleTransfer";
 
 export type KaggleAlignRequest = {
@@ -44,7 +45,7 @@ export async function getKaggleAlignStatus(
 export async function getKaggleAlignOutput(
   kernelSlug: string
 ): Promise<string> {
-  return invoke<string>("get_kaggle_transcode_output", { kernelSlug });
+  return normalizeWorkerLog(await invoke<string>("get_kaggle_transcode_output", { kernelSlug }));
 }
 
 interface CloudAlignState {

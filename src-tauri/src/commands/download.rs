@@ -581,6 +581,8 @@ pub async fn download_web_stream(
     let is_video = [
         "mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "m2ts", "flv", "wmv", "vob"
     ].contains(&ext.as_str());
+    let is_audio_extract = ["mp3", "m4a", "flac", "opus", "wav", "aac"].contains(&ext.as_str())
+        && !req.stream_url.starts_with("http");
 
     let mut final_name = clean_name.clone();
     if is_video && !final_name.to_lowercase().ends_with(".mp4") {
@@ -621,6 +623,7 @@ pub async fn download_web_stream(
     );
 
     let dest_dir_clone = dest_dir_str.clone();
+    let ext_for_task = ext.clone();
 
     tokio::spawn(async move {
         // 1. Emit downloading event
@@ -679,11 +682,26 @@ pub async fn download_web_stream(
             }
         } else {
             let mut cmd = tokio_command(&yt_dlp);
-            cmd.args([
-                "--no-warnings",
-                "--no-playlist",
-                "-o", local_target_file.to_str().unwrap_or(""),
-            ]);
+            if is_audio_extract {
+                // `-o file.mp3` would keep the original container (webm/m4a) under an .mp3 name.
+                // Use a %(ext)s template and let yt-dlp/ffmpeg convert to the requested format.
+                let stem = local_target_file.with_extension("");
+                let tmpl = format!("{}.%(ext)s", stem.to_string_lossy().replace('%', "%%"));
+                cmd.args([
+                    "--no-warnings",
+                    "--no-playlist",
+                    "-x",
+                    "--audio-format", ext_for_task.as_str(),
+                    "--audio-quality", "0",
+                    "-o", tmpl.as_str(),
+                ]);
+            } else {
+                cmd.args([
+                    "--no-warnings",
+                    "--no-playlist",
+                    "-o", local_target_file.to_str().unwrap_or(""),
+                ]);
+            }
             if is_video {
                 cmd.args([
                     "--remux-video", "mp4",
@@ -702,6 +720,10 @@ pub async fn download_web_stream(
                     referer = Some("https://streamtape.com/".to_string());
                 }
             }
+            if referer.is_none() {
+                // 9anime/MegaPlay HLS is Referer-gated; without this "Download Local" gets HTTP 403.
+                referer = crate::commands::nineanime::referer_for(&stream_url);
+            }
             if let Some(ref r) = referer {
                 cmd.args(["--add-header", &format!("Referer: {}", r)]);
             }
@@ -715,8 +737,12 @@ pub async fn download_web_stream(
 
             match output {
                 Ok(out) => {
-                    if out.status.success() {
+                    if out.status.success() && (!is_audio_extract || local_target_file.exists()) {
                         download_success = true;
+                    } else if out.status.success() {
+                        download_err = Some(
+                            "yt-dlp finished but produced no audio file (no search match, or ffmpeg is missing)".to_string(),
+                        );
                     } else {
                         let stderr = String::from_utf8_lossy(&out.stderr);
                         let stdout = String::from_utf8_lossy(&out.stdout);

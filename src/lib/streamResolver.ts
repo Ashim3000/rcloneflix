@@ -71,7 +71,7 @@ export type MatchedMetadata = {
   backdropUrl?: string;
   rating?: number;
   genres?: string[];
-  metadataSource?: "cinemeta" | "tmdb" | "manual";
+  metadataSource?: "cinemeta" | "tmdb" | "stashbox" | "manual";
   metadataId?: string;
 };
 
@@ -268,6 +268,11 @@ export async function fetchWebStreamInfo(url: string): Promise<WebStreamInfo> {
  */
 export async function resolveWebStreamUrl(url: string): Promise<string> {
   const trimmed = url.trim();
+  // Loopback engines (InfiniDysk :8553, DirectPlay proxy :8552, AList :5244, …) already serve
+  // the final bytes; they must never be scraped as HTML pages.
+  if (/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//i.test(trimmed)) {
+    return trimmed;
+  }
 
   // If cyberlocker or magnet link, resolve via configured Debrid service
   if (isDebridResolvableUrl(trimmed)) {

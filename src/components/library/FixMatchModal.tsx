@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { X, Search, Check, Loader2, Edit3, RotateCcw, Image, Save, ExternalLink } from "lucide-react";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { useAppStore, type MediaItem } from "../../store/appStore";
+import { searchScenesByFragment, parseAdultSceneFragment } from "../../lib/stashBox";
 import { useToastStore } from "../../store/toastStore";
 import { persistItems } from "../../lib/libraryDb";
 
@@ -46,11 +47,13 @@ type SearchResult = {
   genres?: string[];
   posterUrl?: string;
   overview?: string;
-  source: "cinemeta" | "tmdb" | "musicbrainz" | "openlibrary" | "itunes" | "deezer" | "theporndb" | "audnexus" | "googlebooks";
+  source: "cinemeta" | "tmdb" | "musicbrainz" | "openlibrary" | "itunes" | "deezer" | "theporndb" | "stashbox" | "audnexus" | "googlebooks";
 };
 
 export function FixMatchModal({ item, onClose, mode = "item", albumTracks }: Props) {
-  const { tmdbApiKey, thePornDbApiKey, updateItemMetadata } = useAppStore();
+  const { tmdbApiKey, thePornDbApiKey, stashBoxProviders, libraries, updateItemMetadata } = useAppStore();
+  const effectiveLibraryType: string =
+    libraries.find((l) => l.id === item.libraryId)?.type || item.libraryType;
 
   const getInitialQuery = () => {
     if (item.libraryType === "music") {
@@ -330,9 +333,9 @@ export function FixMatchModal({ item, onClose, mode = "item", albumTracks }: Pro
 
       // 1. Direct IMDB lookup if query or path contains tt\d+
       const imdbMatch = q.match(/\b(tt\d+)\b/i) || item.remotePath.match(/\{imdb-(tt\d+)\}/i);
-      if (imdbMatch && (item.libraryType === "movies" || item.libraryType === "tv")) {
+      if (imdbMatch && (effectiveLibraryType === "movies" || effectiveLibraryType === "tv")) {
         const imdbId = imdbMatch[1];
-        const type = item.libraryType === "tv" ? "series" : "movie";
+        const type = effectiveLibraryType === "tv" ? "series" : "movie";
         try {
           const detailRes = await safeFetch(`https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`);
           if (detailRes && detailRes.ok) {
@@ -355,8 +358,8 @@ export function FixMatchModal({ item, onClose, mode = "item", albumTracks }: Pro
       }
 
       // 2. Cinemeta search for movies and tv
-      if (item.libraryType === "movies" || item.libraryType === "tv") {
-        const type = item.libraryType === "tv" ? "series" : "movie";
+      if (effectiveLibraryType === "movies" || effectiveLibraryType === "tv") {
+        const type = effectiveLibraryType === "tv" ? "series" : "movie";
         try {
           const res = await safeFetch(
             `https://v3-cinemeta.strem.io/catalog/${type}/top/search=${encodeURIComponent(q)}.json`
@@ -414,7 +417,7 @@ export function FixMatchModal({ item, onClose, mode = "item", albumTracks }: Pro
         }
 
         if (found.length === 0 && tmdbApiKey) {
-          const tmdbType = item.libraryType === "tv" ? "tv" : "movie";
+          const tmdbType = effectiveLibraryType === "tv" ? "tv" : "movie";
           try {
             const res = await safeFetch(
               `https://api.themoviedb.org/3/search/${tmdbType}?query=${encodeURIComponent(q)}&language=en-US&page=1`,
@@ -441,7 +444,37 @@ export function FixMatchModal({ item, onClose, mode = "item", albumTracks }: Pro
             }
           } catch {}
         }
-      } else if (item.libraryType === "adult") {
+      } else if (effectiveLibraryType === "adult") {
+        // Stash-Box providers first (all enabled ones), results merged below
+        const frag = parseAdultSceneFragment(q);
+        const sbProviders = (stashBoxProviders ?? []).filter((p) => p.enabled && p.endpoint?.trim());
+        const sbGroups = await Promise.all(
+          sbProviders.map((p) => searchScenesByFragment(p, frag, undefined).catch(() => []))
+        );
+        const seenSb = new Set<string>();
+        for (const group of sbGroups) {
+          for (const s of group) {
+            if (s.source !== "stashbox") continue;
+            const key = `stashbox:${s.id}`;
+            if (seenSb.has(key)) continue;
+            seenSb.add(key);
+            found.push({
+              id: s.id,
+              title: s.title,
+              artist: [s.studio, ...s.performers].filter(Boolean).join(" • ") || undefined,
+              year: s.date ? parseInt(s.date.substring(0, 4), 10) || undefined : undefined,
+              genres: s.tags.length ? s.tags : undefined,
+              posterUrl: s.posterUrl,
+              overview: [
+                s.date ? `Released: ${s.date}` : "",
+                s.studio ? `Studio: ${s.studio}` : "",
+                s.performers.length ? `Performers: ${s.performers.join(", ")}` : "",
+                s.details || "",
+              ].filter(Boolean).join(" • "),
+              source: "stashbox",
+            });
+          }
+        }
         if (thePornDbApiKey) {
           try {
             const res = await safeFetch(
@@ -470,27 +503,6 @@ export function FixMatchModal({ item, onClose, mode = "item", albumTracks }: Pro
                   posterUrl: poster,
                   overview: scene.description,
                   source: "theporndb",
-                });
-              });
-            }
-          } catch {}
-        }
-        if (found.length === 0 && tmdbApiKey) {
-          try {
-            const res = await safeFetch(
-              `https://api.themoviedb.org/3/search/movie?query=${encodeURIComponent(q)}&language=en-US&page=1`,
-              { headers: { Authorization: `Bearer ${tmdbApiKey}` } }
-            );
-            if (res && res.ok) {
-              const data = await res.json();
-              (data.results ?? []).slice(0, 8).forEach((r: Record<string, unknown>) => {
-                found.push({
-                  id: String(r.id),
-                  title: (r.title as string) ?? q,
-                  year: r.release_date ? parseInt((r.release_date as string).split("-")[0]) : undefined,
-                  posterUrl: r.poster_path ? `https://image.tmdb.org/t/p/w92${r.poster_path}` : undefined,
-                  overview: r.overview as string,
-                  source: "tmdb",
                 });
               });
             }

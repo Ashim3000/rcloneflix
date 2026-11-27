@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { useToastStore } from "../store/toastStore";
+import { normalizeWorkerLog } from "./workerLog";
 
 export type TransferOperation = "copy" | "move" | "sync";
 
@@ -11,6 +12,7 @@ export type KaggleTransferRequest = {
   source: string;
   destination: string;
   batch_items?: string[];
+  dest_filename?: string;
   transfers?: number;
   checkers?: number;
   drive_server_side_copy?: boolean;
@@ -77,7 +79,7 @@ export async function getKaggleTransferStatus(
 export async function getKaggleTransferOutput(
   kernelSlug: string
 ): Promise<string> {
-  return invoke<string>("get_kaggle_transcode_output", { kernelSlug });
+  return normalizeWorkerLog(await invoke<string>("get_kaggle_transcode_output", { kernelSlug }));
 }
 
 interface CloudTransferStore {

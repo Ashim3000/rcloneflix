@@ -8,6 +8,7 @@ import { useToastStore } from "../../store/toastStore";
 import { searchEasynews } from "../../lib/easynews";
 import { queryStremioStreams } from "../../lib/stremioAddonEngine";
 import { httpFetch } from "../../lib/httpFetch";
+import { pickPreferredRcloneRoot } from "../../lib/tvSubscriptionEngine";
 import { SubscribeModal } from "../tv/SubscribeModal";
 
 export type ParsedReleaseDescriptor = {
@@ -114,6 +115,7 @@ export function ProviderSearchModal({ isOpen, onClose }: { isOpen: boolean; onCl
   const [loading, setLoading] = useState(false);
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [matchingId, setMatchingId] = useState<string | null>(null);
+  const [streamingId, setStreamingId] = useState<string | null>(null);
   const [subscribeSeed, setSubscribeSeed] = useState<{
     seriesId: string;
     imdbId?: string;
@@ -228,13 +230,16 @@ export function ProviderSearchModal({ isOpen, onClose }: { isOpen: boolean; onCl
   };
 
   const handleStream = async (hit: SearchHit) => {
+    setStreamingId(hit.id);
     try {
-      if (hit.streamUrl) {
-        onClose();
-        navigate(`/player?url=${encodeURIComponent(hit.streamUrl)}&title=${encodeURIComponent(hit.title)}`);
-        return;
-      }
-      if (hit.nzbUrl) {
+      const now = Date.now();
+      const libraryType = (hit.parsed.kind === "tv" ? "tv" : "movies") as any;
+      let streamUrl = hit.streamUrl || "";
+      let fileName = hit.title;
+      let idPrefix = "provider";
+      let libraryId = "directplay";
+
+      if (!streamUrl && hit.nzbUrl) {
         const playables = await invoke<Array<{ name: string; size: number; virtual_path?: string | null }>>(
           "parse_nzb_media_files",
           { nzbUrl: hit.nzbUrl, nzbXml: null, password: null, virtualDir: "Uncategorized" }
@@ -245,11 +250,32 @@ export function ProviderSearchModal({ isOpen, onClose }: { isOpen: boolean; onCl
           return;
         }
         const davPath = (best.virtual_path || best.name).split("/").map(encodeURIComponent).join("/");
-        onClose();
-        navigate(`/player?url=${encodeURIComponent(`http://127.0.0.1:8553/dav/${davPath}`)}&title=${encodeURIComponent(best.name)}`);
+        streamUrl = `http://127.0.0.1:8553/dav/${davPath}`;
+        fileName = best.name;
+        idPrefix = "usenet";
+        libraryId = "usenet";
       }
+      if (!streamUrl) return;
+
+      const playItem = {
+        id: `${idPrefix}-${now}`,
+        libraryId,
+        libraryType,
+        title: hit.title || fileName,
+        filename: fileName,
+        remotePath: streamUrl,
+        streamUrl,
+        sourceUrl: streamUrl,
+        addedAt: now,
+        lastScannedAt: now,
+        isSourceBookmark: true,
+      };
+      onClose();
+      navigate("/play/video", { state: { item: playItem } });
     } catch (err: any) {
       addToast(`Stream failed: ${err?.message || err}`, "error");
+    } finally {
+      setStreamingId(null);
     }
   };
 
@@ -291,7 +317,7 @@ export function ProviderSearchModal({ isOpen, onClose }: { isOpen: boolean; onCl
     const preferredLib =
       libraries.find((l) => (isDated ? l.type === "adult" : l.type === "tv")) || libraries[0];
     const cleanTitle = hit.matchedMeta?.seriesTitle || hit.parsed.seriesOrSite;
-    const baseRemote = preferredLib?.remotePaths?.[0]?.replace(/\/+$/, "") || "";
+    const baseRemote = pickPreferredRcloneRoot(preferredLib, libraries);
     setSubscribeSeed({
       seriesId: isDated
         ? `dated:${cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
@@ -375,9 +401,11 @@ export function ProviderSearchModal({ isOpen, onClose }: { isOpen: boolean; onCl
               <div className="flex items-center gap-2 shrink-0">
                 <button
                   onClick={() => handleStream(hit)}
-                  className="btn-secondary text-[11px] py-1.5 px-2.5 flex items-center gap-1"
+                  disabled={streamingId === hit.id}
+                  className="btn-secondary text-[11px] py-1.5 px-2.5 flex items-center gap-1 disabled:opacity-50"
                 >
-                  <Play size={12} /> Stream
+                  {streamingId === hit.id ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+                  {streamingId === hit.id ? "Mounting…" : "Stream"}
                 </button>
                 {hit.parsed.kind !== "dated_scene" && (
                   <button

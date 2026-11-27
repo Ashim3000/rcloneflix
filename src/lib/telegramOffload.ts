@@ -5,6 +5,7 @@ import { useToastStore } from "../store/toastStore";
 import { useCloudTransferStore, initCloudTransferPoller } from "./kaggleTransfer";
 import { createVersionFromItem, type MediaSourceVersion } from "./multiVersion";
 import { persistItems } from "./libraryDb";
+import { normalizeWorkerLog } from "./workerLog";
 import { dispatchCloudTask } from "./cloudWorkerRouter";
 
 export const TELEGRAM_MAX_BYTES = 2000 * 1024 * 1024; // 2 GB hard limit
@@ -251,7 +252,7 @@ export async function reconcileTelegramDriveCatalog(): Promise<number> {
 export async function parseAndRegisterTelegramWorkerLogs(logText: string): Promise<number> {
   if (!logText) return 0;
   let count = 0;
-  const lines = logText.split(/\r?\n/);
+  const lines = normalizeWorkerLog(logText).split(/\r?\n/);
   for (const line of lines) {
     const idx = line.indexOf("RCLONEFLIX_TG_OFFLOAD_RESULT:");
     if (idx !== -1) {

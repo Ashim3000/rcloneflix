@@ -2890,7 +2890,107 @@ The following items (100–125) were identified during the comprehensive v0.9.76
 
 ---
 
-*Document updated: 13 November 2026 — Version 1.0.3: Comprehensive Remediation & Multi-Platform Packaging Release (All Items Resolved & Packaged Across Linux Deb, Flatpak, Windows NSIS, Universal Android APK & Android TV APK)*
+### 183. IMPLEMENTED (v1.0.42) — InfiniDysk Usenet NNTP Pool, RAR Scan Caching & Entity Auto-Heal (Item 1)
+* **Platform:** Desktop (`src-tauri/src/commands/usenet_dav.rs`)
+* **Root Cause:** Scanning multi-volume NZB/RAR releases re-downloaded opening segments repeatedly, held connections across stalls/timeouts, lacked XML entity unescaping (`&quot;` / `yEnc` artifacts), did not reset pooled NNTP sockets on config changes, and allowed NZB probe workers to starve playback slots.
+* **Resolution:** Added `xml_unescape`, `extract_clean_subject_filename`, `name_needs_heal`, `heal_persisted_mounts` (preserving legacy path prefixes), shrinkable `conn_sem: RwLock<Arc<Semaphore>>` + `pool_epoch` stale-socket guard in `UsenetEngineState`, `nntp_body` 30s timeout dropping poisoned sockets, `populate_cache=false` for scan tail reads + tail-skip in `scan_rar_volume_fast`, 2-slot reservation for active playback in probe workers, and 5 unit tests (`usenet_dav::tests::*`).
+* **Status:** `IMPLEMENTED` (verified via `cargo test usenet_dav`)
+
+---
+
+### 184. IMPLEMENTED (v1.0.42) — Broken `/player` & `/play/audio` Navigation Fixes (Item 2)
+* **Platform:** Frontend (`src/components/discovery/ProviderSearchModal.tsx`, `src/pages/SettingsPage.tsx`, `src/components/discovery/InfiniDyskSearchModal.tsx`)
+* **Root Cause:** Callers navigated to non-existent `/player?url=...` and `/play/audio` routes (`VideoPlayerPage` expects `location.state.item`).
+* **Resolution:** Switched `ProviderSearchModal` and `SettingsPage` (`UsenetIndexerSettingsCard`) to navigate to `/play/video` with `{ state: { item } }` (plus loading spinner on `ProviderSearchModal` Stream buttons), and updated `InfiniDyskSearchModal` to dispatch `rcloneflix:play-audio`.
+* **Status:** `IMPLEMENTED`
+
+---
+
+### 185. IMPLEMENTED (v1.0.42) — `usenet-drive` & Loopback Web Stream Short-Circuits (Item 3)
+* **Platform:** Desktop (`src-tauri/src/commands/player.rs`, `src-tauri/src/commands/stream_ingest.rs`) & Frontend (`src/lib/streamResolver.ts`)
+* **Root Cause:** `usenet-drive:` FUSE/path resolution dropped full relative prefixes, `check_fuse_path` interfered with `usenet-drive:`, and `resolveWebStreamUrl` attempted external extraction on loopback URLs (`127.0.0.1` / `localhost`).
+* **Resolution:** Passed `&full_relative` for `usenet-drive` in `open_media`, excluded `usenet-drive` from `check_fuse_path`, and added immediate loopback short-circuits in `resolveWebStreamUrl` (both TS and Rust).
+* **Status:** `IMPLEMENTED`
+
+---
+
+### 186. IMPLEMENTED (v1.0.42) — Kaggle Worker JSON-Array Log Normalization (Item 4)
+* **Platform:** Frontend (`src/lib/workerLog.ts`, `src/lib/kaggleTranscode.ts`, `src/lib/kaggleTransfer.ts`, `src/lib/kaggleAligner.ts`, `src/lib/telegramOffload.ts`, `src/lib/workerLog.test.ts`)
+* **Root Cause:** Kaggle outputs logs as escaped JSON arrays of chunks; concatenating/parsing without `normalizeWorkerLog` broke `RCLONEFLIX_TELEGRAM_OFFLOAD_RESULT:` and `RCLONEFLIX_STREAMTAPE_OFFLOAD_RESULT:` parsing across desktop and Android.
+* **Resolution:** Added `normalizeWorkerLog` (joining chunks verbatim without injecting `\n`) and `parseStreamtapeOffloadResults`, wired into Kaggle log consumers and `parseAndRegisterTelegramWorkerLogs` with unit tests.
+* **Status:** `IMPLEMENTED`
+
+---
+
+### 187. IMPLEMENTED (v1.0.42) — Save Direct Media URLs to Remote via Kaggle Worker (Item 5)
+* **Platform:** Frontend (`src/components/library/AddStreamBookmarkModal.tsx`, `src/lib/cloudWorkerRouter.ts`, `src/lib/kaggleTransfer.ts`) & Desktop/Workflow (`src-tauri/src/commands/kaggle.rs`, `.github/workflows/cloud_worker.yml`)
+* **Root Cause:** "Save to Remote" forced local bandwidth download/re-upload even for direct HTTP media URLs, and `rclone_transfer` jobs did not auto-receive Telegram/Streamtape destination credentials from `dispatchCloudTask`.
+* **Resolution:** Added `classifyCloudSaveEligibility` (restricting cloud save to direct HTTP media files, excluding IP-bound/segmented/local streams), optional Kaggle worker dispatch with exact `dest_filename` preservation (`DEST_FILENAME`), and credential forwarding in `dispatchCloudTask` for `rclone_transfer`.
+* **Status:** `IMPLEMENTED`
+
+---
+
+### 188. IMPLEMENTED (v1.0.42) — Smart TV Subscription Destination Routing (Item 6A/B/C)
+* **Platform:** Frontend (`src/lib/tvSubscriptionEngine.ts`, `src/components/discovery/ProviderSearchModal.tsx`, `src/pages/tv/TvShowPage.tsx`, `src/pages/detail/MediaDetailPage.tsx`, `src/components/tv/SubscribeModal.tsx`)
+* **Root Cause:** TV subscription defaults picked ephemeral/virtual prefixes (`streamtape:`, `telegram:`, etc.), `SubscribeModal` hid the destination editor when prefilled and ignored edits to existing `destinationRemotePath`.
+* **Resolution:** Added `isNonStandardRclonePath` / `pickPreferredRcloneRoot`, skipped ephemeral prefixes when inferring default TV series folders, made destination editing unconditional in `SubscribeModal` (fixing `handleSave` to use `destPath.trim()`), and added explicit "Use Rclone Remote" / credential-gated "Use Streamtape" quick buttons.
+* **Status:** `IMPLEMENTED`
+
+---
+
+### 189. IMPLEMENTED (v1.0.42) — Adult Fix Match & Scanner Stash-Box Support (Item 7)
+* **Platform:** Frontend (`src/store/appStore.ts`, `src/lib/streamResolver.ts`, `src/lib/scanner.ts`, `src/components/library/FixMatchModal.tsx`, `src/components/library/AddStreamBookmarkModal.tsx`)
+* **Root Cause:** Adult Fix Match fell back to TMDB instead of querying configured `stashBoxProviders`, and `scanner.ts` skipped Stash-Box when ThePornDB was unconfigured or returned no match.
+* **Resolution:** Added `"stashbox"` to `MediaItem.metadataSource` and `MatchedMetadata.metadataSource`, removed the TMDB fallback from adult `FixMatchModal`, and wired enabled `stashBoxProviders` into `FixMatchModal`, `AddStreamBookmarkModal`, and `scanner.ts` (`metadataConfidence: "medium"`).
+* **Status:** `IMPLEMENTED`
+
+---
+
+### 190. IMPLEMENTED (v1.0.42) — 9anime / MegaPlay Extractor & `yomi.to` Fallback (Item 8)
+* **Platform:** Desktop (`src-tauri/src/commands/nineanime.rs`, `src-tauri/Cargo.toml`, `src-tauri/src/commands/mod.rs`, `src-tauri/src/commands/stream_ingest.rs`, `src-tauri/src/commands/stream_proxy.rs`, `src-tauri/src/commands/download.rs`) & Frontend/Android (`src/lib/nineAnime.ts`, `src/lib/nineAnime.test.ts`, `src/lib/androidPolyfill.ts`, `src/lib/siteBookmarks.ts`, `src/pages/DirectPlayPage.tsx`)
+* **Root Cause:** `yomi.to` is unreachable and legacy CineXtream resolution had no timeout; anime playback needed a working replacement without breaking existing `yomi` invariants/tests.
+* **Resolution:** Added self-contained `nineanime` module (Desktop Rust + Android TS port) supporting `/api/search`, `/watch/<slug>-episode-<n>`, packed JWPlayer direct MP4 embeds, and MegaPlay AES-256-CBC `getSources` decryption with live `e1-player*.js` key-rotation retry and per-host runtime `Referer` registration (`https://megaplay.buzz/`) for both `stream_proxy` and `download_web_stream`. Wrapped `resolve_cinextream` in a 6s timeout before falling back to 9anime (English Dub preferred).
+* **Known Limits (§8d-5):**
+  - Title fallback uses >= 0.6 token overlap; unusually named titles fall back to the existing `cinextream://` marker.
+  - VIP servers are skipped; embed subtitles (`.vtt`) are not wired into playback yet.
+  - Third-party scraper subject to upstream HTML/key changes.
+* **Status:** `IMPLEMENTED`
+
+---
+
+### 191. IMPLEMENTED (v1.0.42) — Comics Portal Popularity Default Sort (Item 9)
+* **Platform:** Desktop (`src-tauri/src/commands/stream_ingest.rs`) & Android (`src/lib/androidPolyfill.ts`)
+* **Root Cause:** Default browse mode sorted Internet Archive by `publicdate+desc` and MangaDex by `latestUploadedChapter`.
+* **Resolution:** Defaulted Archive.org sort to `downloads+desc` and empty-query MangaDex sort to `order[followedCount]=desc` across desktop and Android.
+* **Status:** `IMPLEMENTED`
+
+---
+
+### 192. IMPLEMENTED (v1.0.42) — Remove Defunct `balbums.st`, Keep Bunkr Support (Item 10)
+* **Platform:** Frontend (`src/lib/siteBookmarks.ts`, `src/pages/DirectPlayPage.tsx`, `src/lib/androidPolyfill.ts`) & Desktop (`src-tauri/src/commands/stream_ingest.rs`)
+* **Root Cause:** `balbums.st` is defunct while Bunkr album crawling (`/a/`) still works if sent with the album's own origin `Referer`.
+* **Resolution:** Removed all `balbums` bookmarks, crawlers, UI labels (`Show Adult Portals`), and routing while deriving `Referer` from the Bunkr album URL origin.
+* **Status:** `IMPLEMENTED`
+
+---
+
+### 193. IMPLEMENTED (v1.0.42) — Video Player "Up Next" Overlay Dismissal & Error Guard (Item 11)
+* **Platform:** Frontend (`src/pages/player/VideoPlayerPage.tsx`)
+* **Root Cause:** Dismissing the Up Next overlay did not clear the countdown interval, and playback errors could still trigger Up Next on end.
+* **Resolution:** Added `dismissUpNext` clearing `upNextTimerRef` and guarded both `handlePlaybackEnded` and overlay rendering on `!hasDismissedUpNextRef.current && !ps.error`.
+* **Status:** `IMPLEMENTED`
+
+---
+
+### 194. IMPLEMENTED (v1.0.42) — Deezer Music Discovery Tab & Real `yt-dlp` Audio Extraction (Item 12)
+* **Platform:** Frontend (`src/lib/musicDiscovery.ts`, `src/lib/musicDiscovery.test.ts`, `src/components/music/MusicDiscoverPanel.tsx`, `src/pages/music/MusicLibraryPage.tsx`, `src/components/discovery/InfiniDyskSearchModal.tsx`) & Desktop (`src-tauri/src/commands/download.rs`)
+* **Root Cause:** Music library lacked library-driven discovery/previews, and `download_web_stream` named `.mp3` outputs without running `yt-dlp -x --audio-format`, storing un-extracted video/webm containers.
+* **Resolution:** Added Deezer-backed `MusicDiscoverPanel` with 30s previews, library ownership filtering, "Find on Usenet" (`defaultLibraryType="music"`), and "Grab track" (desktop-only, rejecting shared libraries/remotes), plus `-x --audio-format` extraction + target-file existence verification in `download_web_stream` (requires `ffmpeg` on `PATH`).
+* **Status:** `IMPLEMENTED`
+
+---
+
+*Document updated: 26 November 2026 — Version 1.0.42: InfiniDysk Streaming Remediation, Save-to-Remote, Subscription Routing, Stash-Box, 9anime Extractor & Music Discovery Release*
 
 
 

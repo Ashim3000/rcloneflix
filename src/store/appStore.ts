@@ -196,7 +196,7 @@ export type MediaItem = {
   genres?: string[];
   duration?: number;
   metadataId?: string;
-  metadataSource?: "cinemeta" | "tmdb" | "musicbrainz" | "openlibrary" | "audnexus" | "theporndb" | "manual" | "itunes" | "deezer" | "googlebooks";
+  metadataSource?: "cinemeta" | "tmdb" | "musicbrainz" | "openlibrary" | "audnexus" | "theporndb" | "stashbox" | "manual" | "itunes" | "deezer" | "googlebooks";
   metadataConfidence?: "high" | "medium" | "low" | "manual";
   addedAt: number;
   lastScannedAt: number;
