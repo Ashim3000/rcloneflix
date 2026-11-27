@@ -7,7 +7,8 @@ import { useAppStore } from "./store/appStore";
 import { scanAllLibraries } from "./lib/scanner";
 import { loadSecrets, startSecretSync } from "./lib/secrets";
 import { log } from "./lib/log";
-import { checkPassExpiry, syncIssuedPasses } from "./lib/accessPass";
+import { checkPassExpiry, syncIssuedPasses, syncSharedPassLibraries } from "./lib/accessPass";
+import { installPublishWatcher } from "./lib/guestPublish";
 import { loadLibrary, startLibrarySync, pruneLegacyLocalStorage } from "./lib/libraryDb";
 import { initCloudTranscodePoller } from "./lib/kaggleTranscode";
 import { initCloudTransferPoller } from "./lib/kaggleTransfer";
@@ -162,16 +163,50 @@ export default function App() {
     scanAllLibraries().catch(() => {});
   }, [setupComplete, secretsReady]);
 
-  // Periodic check for expired shared passes and sync of issued passes
+  // Periodic check for expired shared passes, sync of issued passes, guest catalog pull, admin catalog push
   useEffect(() => {
     if (!secretsReady || !setupComplete) return;
+
+    const pullCatalogs = () =>
+      syncSharedPassLibraries()
+        .then(async (results) => {
+          const changed = results.filter((r) => r.status === "updated");
+          if (changed.length === 0) return;
+          const { useToastStore } = await import("./store/toastStore");
+          for (const r of changed) {
+            useToastStore
+              .getState()
+              .addToast(`Updated ${r.label}: +${r.added} new, ${r.updated} updated, ${r.removed} removed`, "info");
+          }
+        })
+        .catch(() => {});
+
     checkPassExpiry().catch(() => {});
     syncIssuedPasses().catch(() => {});
-    const interval = setInterval(() => {
+    void pullCatalogs();
+
+    const slow = setInterval(() => {
       checkPassExpiry().catch(() => {});
       syncIssuedPasses().catch(() => {});
     }, 6 * 3600 * 1000);
-    return () => clearInterval(interval);
+    const hourly = setInterval(() => void pullCatalogs(), 3600 * 1000);
+
+    let lastPull = Date.now();
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && Date.now() - lastPull > 30 * 60 * 1000) {
+        lastPull = Date.now();
+        void pullCatalogs();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    const stopWatcher = installPublishWatcher();
+
+    return () => {
+      clearInterval(slow);
+      clearInterval(hourly);
+      document.removeEventListener("visibilitychange", onVisible);
+      stopWatcher();
+    };
   }, [secretsReady, setupComplete]);
 
   if (!secretsReady) {

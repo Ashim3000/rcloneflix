@@ -1986,6 +1986,10 @@ export async function scanLibrary(
   apiKeys: { tmdb: string; theporndb: string },
   options: { skipMetadata?: boolean } = {}
 ) {
+  // Live-synced guest libraries are populated from the grantor's catalog; scanning them would list the shared
+  // remote with the grantor's credentials and create duplicate, non-`shared_` ids.
+  if (library.isSharedPass && library.passSync) return;
+
   const currentStatus = useAppStore.getState().scanState.status;
   if (currentStatus === "scanning") return;
 
@@ -2384,6 +2388,10 @@ export async function refreshLibraryMetadata(
   forceAll: boolean = true,
   targetIds?: string[]
 ): Promise<void> {
+  // Live-synced guest libraries are populated from the grantor's catalog; scanning them would list the shared
+  // remote with the grantor's credentials and create duplicate, non-`shared_` ids.
+  if (library.isSharedPass && library.passSync) return;
+
   const currentStatus = useAppStore.getState().scanState.status;
   if (currentStatus === "scanning") return;
 

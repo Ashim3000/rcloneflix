@@ -53,7 +53,8 @@ import { readTextFile } from "@tauri-apps/plugin-fs";
 import { scanLibrary } from "../lib/scanner";
 import { CreateAccessPassModal } from "../components/accessPass/CreateAccessPassModal";
 import { ImportAccessPassModal } from "../components/accessPass/ImportAccessPassModal";
-import { removeSharedPass, revokeIssuedPass, formatDuration, syncIssuedPasses } from "../lib/accessPass";
+import { removeSharedPass, revokeIssuedPass, formatDuration, syncIssuedPasses, publishUpdatesToIssuedPasses, syncSharedPassLibraries } from "../lib/accessPass";
+import { isAutoPublishEnabled, setAutoPublishEnabled } from "../lib/guestPublish";
 import { refreshTraktDiscovery } from "../lib/trakt";
 import { refreshSimklDiscovery, getSimklPin, pollSimklPin, DEFAULT_SIMKL_CLIENT_ID, type SimklPinResponse } from "../lib/simkl";
 import { testEasynewsConnection } from "../lib/easynews";
@@ -237,6 +238,9 @@ export function SettingsPage() {
   const [testingKaggle, setTestingKaggle] = useState(false);
   const [kaggleTestResult, setKaggleTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [syncingPasses, setSyncingPasses] = useState(false);
+  const [pushingPasses, setPushingPasses] = useState(false);
+  const [syncingShared, setSyncingShared] = useState(false);
+  const [autoPublish, setAutoPublish] = useState<boolean>(isAutoPublishEnabled());
 
   // GitHub Actions Worker Rotation states
   const [ghaEnabled, setGhaEnabled] = useState(ghaConfig?.enabled ?? false);
@@ -2572,9 +2576,32 @@ export function SettingsPage() {
                     Libraries shared with you by friends. Streaming is direct from their cloud.
                   </p>
                 </div>
-                <span className="font-mono text-xs text-subtle">
-                  {libraries.filter((l) => l.isSharedPass).length} active
-                </span>
+                <div className="flex items-center gap-3">
+                  <span className="font-mono text-xs text-subtle">
+                    {libraries.filter((l) => l.isSharedPass).length} active
+                  </span>
+                  <button
+                    onClick={async () => {
+                      setSyncingShared(true);
+                      try {
+                        const rs = await syncSharedPassLibraries({ force: true });
+                        const bad = rs.find((r) => r.status === "error" || r.status === "blocked");
+                        const n = rs.reduce((a, r) => a + r.added + r.updated + r.removed, 0);
+                        useToastStore
+                          .getState()
+                          .addToast(bad ? bad.message || "Sync problem" : n ? `Library updated (${n} changes)` : "Already up to date", bad ? "error" : "success");
+                      } finally {
+                        setSyncingShared(false);
+                      }
+                    }}
+                    disabled={syncingShared}
+                    className="p-1.5 rounded-lg bg-surface/50 border border-border text-subtle hover:text-white hover:border-accent/40 transition-colors flex items-center gap-1.5 text-xs"
+                    title="Fetch the latest catalog from the people who shared with you"
+                  >
+                    <RefreshCw size={12} className={syncingShared ? "animate-spin text-accent" : ""} />
+                    <span>Sync Updates</span>
+                  </button>
+                </div>
               </div>
 
               {libraries.filter((l) => l.isSharedPass).length === 0 ? (
@@ -2690,6 +2717,17 @@ export function SettingsPage() {
                   <p className="font-body text-xs text-subtle">
                     Passes you created for friends. You can revoke access at any time.
                   </p>
+                  <label className="mt-1 flex items-center gap-2 font-body text-xs text-subtle cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={autoPublish}
+                      onChange={(e) => {
+                        setAutoPublish(e.target.checked);
+                        setAutoPublishEnabled(e.target.checked);
+                      }}
+                    />
+                    Auto-push library updates to active guest passes after scans
+                  </label>
                 </div>
                 <div className="flex items-center gap-3">
                   <span className="font-mono text-xs text-subtle">
@@ -2708,6 +2746,26 @@ export function SettingsPage() {
                   >
                     <RefreshCw size={12} className={syncingPasses ? "animate-spin text-accent" : ""} />
                     <span>Sync</span>
+                  </button>
+                  <button
+                    onClick={async () => {
+                      setPushingPasses(true);
+                      try {
+                        const r = await publishUpdatesToIssuedPasses({ force: true });
+                        const msg = r.failed.length
+                          ? `Push finished with ${r.failed.length} error(s): ${r.failed[0].error}`
+                          : `Pushed to ${r.updated} pass(es)` + (r.skipped.length ? `, ${r.skipped.length} skipped` : "");
+                        useToastStore.getState().addToast(msg, r.failed.length ? "error" : "success");
+                      } finally {
+                        setPushingPasses(false);
+                      }
+                    }}
+                    disabled={pushingPasses}
+                    className="p-1.5 rounded-lg bg-surface/50 border border-border text-subtle hover:text-white hover:border-accent/40 transition-colors flex items-center gap-1.5 text-xs"
+                    title="Publish your current library catalog to all active guest passes"
+                  >
+                    <RefreshCw size={12} className={pushingPasses ? "animate-spin text-accent" : ""} />
+                    <span>Push Updates</span>
                   </button>
                 </div>
               </div>
@@ -2771,6 +2829,13 @@ export function SettingsPage() {
                               Libraries:{" "}
                               {pass.sharedLibraries.map((l) => l.name).join(", ")}
                             </span>
+                          </div>
+                          <div className="font-body text-[11px] text-subtle">
+                            {pass.catalogKey
+                              ? pass.lastPublishedAt
+                                ? `Last pushed: ${new Date(pass.lastPublishedAt).toLocaleString()} (${pass.catalogItemCount ?? 0} items)`
+                                : "Not pushed yet"
+                              : "Live updates unavailable — issued before live sync; re-issue to enable"}
                           </div>
                         </div>
 

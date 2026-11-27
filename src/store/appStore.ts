@@ -56,9 +56,20 @@ export type Library = {
   expiresAt?: number;
   isExpired?: boolean;
   grantorLabel?: string;
+  passSync?: PassSyncInfo;
 };
 
 export type AccessPassDuration = "1d" | "7d" | "60d" | "lifetime";
+
+export type PassSyncInfo = {
+  tokenPath: string;                       // guest-scoped, e.g. "shared_cloud_1:.rflix_passes/<passId>.json"
+  manifestPath: string;                    // "…/<passId>.catalog.json"
+  catalogPath: string;                     // "…/catalog_<passId>.rfc"
+  catalogKey: string;                      // base64 AES key for the .rfc
+  remoteMapping: Record<string, string>;   // admin remote -> scoped shared_* remote
+  updatedAt?: number;                      // manifest.updatedAt last applied
+  hash?: string;                           // manifest.hash last applied
+};
 
 export type IssuedPass = {
   passId: string;
@@ -73,6 +84,11 @@ export type IssuedPass = {
   expiresAt?: number;
   guestEmail?: string;
   lastReminderSentAt?: number;
+  catalogKey?: string;        // absent on passes issued before this feature => no live updates
+  catalogHash?: string;
+  catalogUpdatedAt?: number;
+  catalogItemCount?: number;
+  lastPublishedAt?: number;
 };
 
 export type StremioAddonConfig = {
@@ -718,6 +734,7 @@ type AppStore = AppConfig & {
   // Media
   upsertMediaItem: (item: MediaItem) => void;
   removeMediaItem: (id: string) => void;
+  removeMediaItemsBulk: (ids: string[]) => void;
   bulkUpsertMediaItems: (items: MediaItem[]) => void;
   updateItemMetadata: (id: string, updates: Partial<MediaItem>) => void;
   setItemUserTags: (itemId: string, tags: string[]) => void;
@@ -1472,6 +1489,14 @@ export const useAppStore = create<AppStore>()(
         set((s) => ({ mediaItems: { ...s.mediaItems, [item.id]: item } })),
       removeMediaItem: (id) =>
         set((s) => { const n = { ...s.mediaItems }; delete n[id]; return { mediaItems: n }; }),
+      removeMediaItemsBulk: (ids) =>
+        set((s) => {
+          if (ids.length === 0) return s;
+          const drop = new Set(ids);
+          const next: Record<string, MediaItem> = {};
+          for (const [k, v] of Object.entries(s.mediaItems)) if (!drop.has(k)) next[k] = v;
+          return { mediaItems: next };
+        }),
       bulkUpsertMediaItems: (items) =>
         set((s) => {
           const n = { ...s.mediaItems };

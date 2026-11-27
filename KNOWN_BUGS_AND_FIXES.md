@@ -3006,9 +3006,18 @@ The following items (100–125) were identified during the comprehensive v0.9.76
 
 ---
 
-*Document updated: 26 November 2026 — Version 1.0.43: `yt-dlp` Path Priority & Music Discovery InfiniDysk Routing Fix*
+### 197. IMPLEMENTED (v1.0.44) — Guest Pass Live Library Sync, Scoped Encrypted Catalogs & Per-Pass Remote Namespacing
+* **Platform:** Frontend (`src/lib/guestCatalog.ts`, `src/lib/guestCatalog.test.ts`, `src/lib/guestPublish.ts`, `src/lib/accessPass.ts`, `src/lib/accessPass.test.ts`, `src/store/appStore.ts`, `src/lib/scanner.ts`, `src/App.tsx`, `src/pages/SettingsPage.tsx`)
+* **Root Cause:** (1) `exportAccessPass` previously uploaded a full unencrypted `backupToRemote` (`RcloneFlix/rcloneflix-backup.json.gz` containing all libraries, API keys, and `rcloneConfigContent`) onto the shared cloud remote; (2) Guests had no mechanism to receive library additions, metadata fixes, or Curator Picks updates after initial `.rflix` import without re-scanning or re-importing; (3) Guest `scanAllLibraries()` / `scanLibrary()` had no guard against scanning live-synced shared pass libraries, creating duplicate non-`shared_` item IDs; (4) `extractScopedRcloneConfig` numbered remotes `shared_cloud_1…` globally per export, so importing a second pass from the same host could collide with or overwrite the first pass's remotes.
+* **Resolution:**
+  - Added per-pass AES-GCM encrypted catalog snapshots (`.rflix_passes/catalog_<passId>.rfc` with optional gzip framing + `catalogKey` inside `.rflix`) and an admin-only freshness manifest (`.rflix_passes/<passId>.catalog.json` with `updatedAt`, SHA-256 `hash`, and `itemCount`) so publish never rewrites `<passId>.json` tokens.
+  - Added `publishUpdatesToIssuedPasses` and a single content-hash-gated store watcher (`installPublishWatcher` in `src/lib/guestPublish.ts`, 45s trailing debounce / 10m max-wait, zero network I/O when hash is unchanged) plus manual **Push Updates** and auto-publish toggle in Settings.
+  - Added `syncSharedPassLibraries` on guest startup, hourly interval, foreground resume, and manual **Sync Updates** button in Settings, with empty/>50%-shrink destructive guards, guest `userTags`/`addedAt` preservation, and per-pass `mergeGuestRecommendations`.
+  - Guarded `scanLibrary` and `refreshLibraryMetadata` to skip live-synced shared libraries (`library.isSharedPass && library.passSync`), guarded `extendIssuedPass` against un-revoking revoked tokens, made `removeSharedPass` collision-safe across multiple imported passes, and namespaced newly exported guest remotes per pass (`shared_<4char>_cloud_1`).
+  - **Honest Limits:** Guests hold real credentials for the shared remote in order to stream, so revocation is cooperative inside the app (true revocation requires rotating the remote's credentials); catalogs are encrypted per pass (`catalogKey`), but guests can still list/read the underlying shared remote; live updates require the grantor to publish and the guest to sync (not push notifications); passes issued before v1.0.44 lack `catalogKey` and must be re-issued for live updates.
+* **Status:** `IMPLEMENTED`
 
+---
 
-
-
+*Document updated: 27 November 2026 — Version 1.0.44: Guest Pass Live Library Sync & Encrypted Per-Pass Catalogs*
 

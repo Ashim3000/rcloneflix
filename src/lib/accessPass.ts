@@ -18,6 +18,7 @@ import {
   type AccessPassDuration,
   type IssuedPass,
   type WeeklyRecommendation,
+  type PassSyncInfo,
 } from "../store/appStore";
 import { invoke } from "@tauri-apps/api/core";
 import { loadUdropConfig, saveUdropConfig } from "./udrop";
@@ -32,7 +33,21 @@ import {
   saveAccessPassFile,
 } from "./tauri";
 import { backupToRemote, BACKUP_FILE } from "./rcloneSync";
-import { persistItems, persistProgress, persistProgressBatch, clearLibrary, setLibrarySyncPaused } from "./libraryDb";
+import { persistItems, persistProgress, persistProgressBatch, clearLibrary, setLibrarySyncPaused, deleteItems } from "./libraryDb";
+import {
+  CATALOG_VERSION,
+  MAX_CATALOG_BYTES,
+  buildGuestCatalogBody,
+  encodeBody,
+  generateCatalogKey,
+  mergeGuestRecommendations,
+  packCatalog,
+  planCatalogApply,
+  sha256Hex,
+  unpackCatalog,
+  type CatalogManifest,
+  type GuestCatalogBody,
+} from "./guestCatalog";
 import { log } from "./log";
 import { getUserBookmarks } from "./siteBookmarks";
 
@@ -96,6 +111,9 @@ export type AccessPassPayload = {
   sharedLibraries: SharedLibraryMeta[];
   tokenPath: string;
   backupPath: string;
+  catalogKey?: string;     // per-pass AES key for the encrypted catalog
+  catalogPath?: string;    // guest-scoped: <shared>:.rflix_passes/catalog_<passId>.rfc
+  manifestPath?: string;   // guest-scoped: <shared>:.rflix_passes/<passId>.catalog.json
   lnurl?: string;
   adminPayload?: AdminPassPayload;
   weeklyRecommendations?: Record<string, WeeklyRecommendation[]>; // keyed by ORIGINAL library id
@@ -285,7 +303,8 @@ export function findRemoteDependencies(
 export function extractScopedRcloneConfig(
   configContent: string,
   requiredRemoteNames: string[],
-  offloadRemoteNames: Set<string> = new Set()
+  offloadRemoteNames: Set<string> = new Set(),
+  namePrefix: string = ""
 ): { scopedConfig: string; remoteMapping: Record<string, string> } {
   const sections = parseRcloneIni(configContent);
   const allNeededRemotes = new Set<string>();
@@ -300,7 +319,7 @@ export function extractScopedRcloneConfig(
   for (const r of allNeededRemotes) {
     const isOffload =
       offloadRemoteNames.has(r) || /^(udrop|tg[-_]|telegram|streamtape|dropmb|dood)/i.test(r);
-    remoteMapping[r] = isOffload ? `shared_fast_${fastIdx++}` : `shared_cloud_${cloudIdx++}`;
+    remoteMapping[r] = isOffload ? `shared_${namePrefix}fast_${fastIdx++}` : `shared_${namePrefix}cloud_${cloudIdx++}`;
   }
 
   const outputLines: string[] = [];
@@ -523,6 +542,39 @@ export type ExportPassOptions = {
   passType?: AccessPassType;
   guestEmail?: string;
 };
+
+const passFile = (remote: string, passId: string, kind: "token" | "manifest" | "catalog") =>
+  `${remote}:.rflix_passes/${kind === "token" ? `${passId}.json` : kind === "manifest" ? `${passId}.catalog.json` : `catalog_${passId}.rfc`}`;
+
+/** Uploads catalog first, manifest last (the guest only trusts the manifest). Admin-side only (unscoped remote). */
+async function uploadCatalogFiles(opts: {
+  configPath: string;
+  remote: string;
+  passId: string;
+  catalogKey: string;
+  bytes: Uint8Array;
+  hash: string;
+  itemCount: number;
+  updatedAt: number;
+}): Promise<void> {
+  const blob = await packCatalog(opts.bytes, opts.catalogKey);
+  if (blob.length > MAX_CATALOG_BYTES) {
+    throw new Error(`Catalog too large to publish (${Math.round(blob.length / 1048576)} MB).`);
+  }
+  await rcloneUploadBytes(opts.configPath, passFile(opts.remote, opts.passId, "catalog"), blob);
+  const manifest: CatalogManifest = {
+    v: 1,
+    passId: opts.passId,
+    updatedAt: opts.updatedAt,
+    hash: opts.hash,
+    itemCount: opts.itemCount,
+  };
+  await rcloneUploadBytes(
+    opts.configPath,
+    passFile(opts.remote, opts.passId, "manifest"),
+    new TextEncoder().encode(JSON.stringify(manifest))
+  );
+}
 
 /**
  * Creates and exports a serverless encrypted `.rflix` access pass (Admin or Guest).
@@ -751,17 +803,36 @@ export async function exportAccessPass(options: ExportPassOptions): Promise<{
   };
   const tokenBytes = new TextEncoder().encode(JSON.stringify(initialToken, null, 2));
 
-  // 1 & 2. Iterate through writable cloud candidates until both backup and token upload succeed
+  const catalogKey = generateCatalogKey();
+  const catalogLibs = targetLibs.map((l) => ({ id: l.id, name: l.name, type: l.type }));
+  const catalogBody = buildGuestCatalogBody({
+    passId,
+    libraries: catalogLibs,
+    mediaItems: s.mediaItems,
+    picks: s.adminWeeklyRecommendations || {},
+  });
+  const encodedCatalog = await encodeBody(catalogBody);
+  const catalogUpdatedAt = Date.now();
+
+  // 1 & 2. Iterate through writable cloud candidates until both token and catalog upload succeed
   let primaryRemote = writableCandidates[0];
   let lastUploadErr: unknown = null;
   let uploadSucceeded = false;
 
   for (const candidate of writableCandidates) {
-    const backupFolder = `${candidate}:RcloneFlix`;
-    const candidateTokenPath = `${candidate}:.rflix_passes/${passId}.json`;
+    const candidateTokenPath = passFile(candidate, passId, "token");
     try {
-      await backupToRemote(backupFolder);
-      await rcloneUploadBytes(s.rcloneConfigPath, candidateTokenPath, tokenBytes);
+      await rcloneUploadBytes(s.rcloneConfigPath, candidateTokenPath, tokenBytes); // also creates .rflix_passes/
+      await uploadCatalogFiles({
+        configPath: s.rcloneConfigPath,
+        remote: candidate,
+        passId,
+        catalogKey,
+        bytes: encodedCatalog.bytes,
+        hash: encodedCatalog.hash,
+        itemCount: catalogBody.items.length,
+        updatedAt: catalogUpdatedAt,
+      });
       primaryRemote = candidate;
       uploadSucceeded = true;
       break;
@@ -779,13 +850,45 @@ export async function exportAccessPass(options: ExportPassOptions): Promise<{
     );
   }
 
+  try {
+    // Old versions uploaded the FULL unencrypted rclone.conf + API keys here, readable by every guest of this remote.
+    // Skip if already passphrase-encrypted (RFLIX_ENC1:) or already redacted, and confirm before overwriting an unencrypted backup.
+    const legacyBackup = `${primaryRemote}:RcloneFlix/${BACKUP_FILE}`;
+    const existingRaw = await rcloneReadBackup(s.rcloneConfigPath, legacyBackup);
+    if (
+      existingRaw &&
+      !existingRaw.startsWith("RFLIX_ENC1:") &&
+      !existingRaw.includes('"redactedBy"')
+    ) {
+      const shouldRedact =
+        typeof window === "undefined" ||
+        typeof window.confirm !== "function" ||
+        window.confirm(
+          `An unencrypted RcloneFlix backup was found on "${primaryRemote}:RcloneFlix/${BACKUP_FILE}". Because guests with this pass can read that remote, replace the unencrypted backup file with a redacted stub? (You can create a passphrase-encrypted backup in Settings → Sync & Backup.)`
+        );
+      if (shouldRedact) {
+        await invoke("rclone_write_backup", {
+          configPath: s.rcloneConfigPath,
+          remotePath: legacyBackup,
+          content: JSON.stringify({
+            version: 3,
+            redactedBy: "RcloneFlix guest-pass export",
+            note: "Contained unencrypted credentials; replaced. Re-run Backup with a passphrase.",
+          }),
+        });
+      }
+    }
+  } catch { /* no legacy file; never block export */ }
+
   // Ensure primaryRemote is included in shareableRemotes BEFORE extracting scoped config
   shareableRemotes.add(primaryRemote);
 
+  const namePrefix = `${passId.slice(-4).toLowerCase().replace(/[^a-z0-9]/g, "x")}_`;
   const { scopedConfig, remoteMapping } = extractScopedRcloneConfig(
     configContent,
     Array.from(shareableRemotes),
-    offloadRemoteNames
+    offloadRemoteNames,
+    namePrefix
   );
 
   // Harvest active weekly recommendations for the selected libraries
@@ -816,6 +919,7 @@ export async function exportAccessPass(options: ExportPassOptions): Promise<{
     };
   });
 
+  const scopedPrimary = remoteMapping[primaryRemote] || `shared_${primaryRemote}`;
   const payload: AccessPassPayload = {
     magic: ACCESS_PASS_MAGIC,
     version: 1,
@@ -826,8 +930,11 @@ export async function exportAccessPass(options: ExportPassOptions): Promise<{
     createdAt: Date.now(),
     scopedRcloneConfig: scopedConfig,
     sharedLibraries: scopedSharedLibs,
-    tokenPath: `${remoteMapping[primaryRemote] || `shared_${primaryRemote}`}:.rflix_passes/${passId}.json`,
-    backupPath: `${remoteMapping[primaryRemote] || `shared_${primaryRemote}`}:RcloneFlix/${BACKUP_FILE}`,
+    tokenPath: `${scopedPrimary}:.rflix_passes/${passId}.json`,
+    backupPath: "",
+    catalogKey,
+    catalogPath: passFile(scopedPrimary, passId, "catalog"),
+    manifestPath: passFile(scopedPrimary, passId, "manifest"),
     lnurl: options.grantorLnurl,
     weeklyRecommendations:
       Object.keys(weeklyRecommendations).length > 0 ? weeklyRecommendations : undefined,
@@ -884,6 +991,11 @@ export async function exportAccessPass(options: ExportPassOptions): Promise<{
     status: "unclaimed",
     expiresAt: initialExpiresAt,
     guestEmail: options.guestEmail?.trim() || undefined,
+    catalogKey,
+    catalogHash: encodedCatalog.hash,
+    catalogUpdatedAt,
+    catalogItemCount: catalogBody.items.length,
+    lastPublishedAt: catalogUpdatedAt,
   });
 
   return {
@@ -1066,6 +1178,71 @@ async function importAdminPass(
   };
 }
 
+export function buildGuestLibraryStateFromItems(args: {
+  rawItems: MediaItem[];
+  sourceLibraryIds: Set<string>;                 // ORIGINAL admin library ids
+  remoteMapping: Record<string, string>;          // orig remote -> scoped remote, already filtered to remotes that exist
+  availableScopedRemotes: Set<string>;
+  weeklyRecommendations?: Record<string, WeeklyRecommendation[]>;
+}): { items: MediaItem[]; guestRecommendations: WeeklyRecommendation[] } {
+  const { rawItems, sourceLibraryIds, remoteMapping, availableScopedRemotes } = args;
+  const passRecs = args.weeklyRecommendations || {};
+  const guestRecommendations: WeeklyRecommendation[] = [];
+  const items: MediaItem[] = [];
+
+  for (const item of rawItems) {
+    if (!sourceLibraryIds.has(item.libraryId)) continue;
+    const scopedLibId = `shared_${item.libraryId}`;
+    let scopedRemotePath = rewriteRemotePath(item.remotePath, remoteMapping);
+
+    const libRecs = passRecs[item.libraryId] || [];
+    const recMatch = libRecs.find(
+      (r) => r.itemId === item.id || r.title.toLowerCase().trim() === item.title.toLowerCase().trim()
+    );
+    const isRecommended = Boolean(recMatch);
+    const recommendationBadge = recMatch
+      ? { text: recMatch.badgeText || "Curator Pick", effect: recMatch.badgeEffect || "glow", note: recMatch.note }
+      : undefined;
+    if (recMatch) guestRecommendations.push({ ...recMatch, itemId: `shared_${item.id}` });
+
+    const updatedVersions = Array.isArray(item.versions)
+      ? item.versions.map((v) => {
+          const nextRemotePath = v.remotePath ? rewriteRemotePath(v.remotePath, remoteMapping) : v.remotePath;
+          const nextRemoteName =
+            remoteMapping[v.remoteName] ||
+            (v.remoteName && !v.remoteName.startsWith("shared_") && !/^https?$/i.test(v.remoteName)
+              ? `shared_${v.remoteName}`
+              : v.remoteName);
+          return { ...v, remotePath: nextRemotePath, remoteName: nextRemoteName };
+        })
+      : item.versions;
+
+    // Primary path on a remote the guest doesn't have (e.g. streamtape loopback) -> promote a playable version.
+    const primaryColon = scopedRemotePath.indexOf(":");
+    const primaryPrefix =
+      primaryColon !== -1 && !/^https?:\/\//i.test(scopedRemotePath) ? scopedRemotePath.slice(0, primaryColon) : "";
+    if (primaryPrefix && !availableScopedRemotes.has(primaryPrefix) && Array.isArray(updatedVersions)) {
+      const playable = updatedVersions.find((v) => {
+        if (!v.remotePath || /^https?:\/\//i.test(v.remotePath)) return false;
+        const c = v.remotePath.indexOf(":");
+        return c !== -1 && availableScopedRemotes.has(v.remotePath.slice(0, c));
+      });
+      if (playable?.remotePath) scopedRemotePath = playable.remotePath;
+    }
+
+    items.push({
+      ...item,
+      id: `shared_${item.id}`,
+      libraryId: scopedLibId,
+      remotePath: scopedRemotePath,
+      versions: updatedVersions,
+      isRecommended,
+      recommendationBadge,
+    });
+  }
+  return { items, guestRecommendations };
+}
+
 /**
  * 1-Click Zero-Passphrase Import:
  * Decrypts envelope, claims single-use token on cloud, merges scoped remotes,
@@ -1184,129 +1361,91 @@ export async function importAccessPass(
     new TextEncoder().encode(JSON.stringify(claimedToken, null, 2))
   );
 
-  // 3. Ingest Rich Metadata directly from remote backup
+  // 3. Ingest catalog (new passes: encrypted per-pass catalog; legacy passes: grantor backup file)
   onProgress?.("Ingesting library metadata and posters...");
   let ingestedCount = 0;
+  const availableScopedRemotes = new Set(extractSectionNames(payload.scopedRcloneConfig));
+  const guestImportMapping: Record<string, string> = {};
+  if (payload.remoteMapping && Object.keys(payload.remoteMapping).length > 0) {
+    for (const [orig, anon] of Object.entries(payload.remoteMapping)) {
+      if (availableScopedRemotes.has(anon)) guestImportMapping[orig] = anon;
+    }
+  } else {
+    // Legacy passes (pre-v1.0.3): scoped sections are shared_<orig>
+    for (const scopedName of availableScopedRemotes) {
+      if (scopedName.startsWith("shared_")) guestImportMapping[scopedName.slice("shared_".length)] = scopedName;
+    }
+  }
+  let initialSync: { updatedAt: number; hash: string } | undefined;
   try {
-    const rawBackup = await rcloneReadBackup(resolvedConfigPath, payload.backupPath);
-    const backupData = JSON.parse(rawBackup);
+    let rawItems: MediaItem[] = [];
+    let recs = payload.weeklyRecommendations;
 
-    if (backupData && backupData.mediaItems) {
-      const backupItems = Object.values(backupData.mediaItems) as MediaItem[];
-      const sharedLibOriginalIds = new Set(payload.sharedLibraries.map((l) => l.id));
-
-      const availableScopedRemotes = new Set(extractSectionNames(payload.scopedRcloneConfig));
-      const guestImportMapping: Record<string, string> = {};
-      if (payload.remoteMapping && Object.keys(payload.remoteMapping).length > 0) {
-        for (const [orig, anon] of Object.entries(payload.remoteMapping)) {
-          if (availableScopedRemotes.has(anon)) guestImportMapping[orig] = anon;
-        }
-      } else {
-        // Legacy passes (pre-v1.0.3): scoped sections are shared_<orig>
-        for (const scopedName of availableScopedRemotes) {
-          if (scopedName.startsWith("shared_")) {
-            const origName = scopedName.slice("shared_".length);
-            guestImportMapping[origName] = scopedName;
-          }
-        }
+    if (payload.catalogPath && payload.catalogKey) {
+      const blob = await rcloneReadBytes(resolvedConfigPath, payload.catalogPath);
+      const bytes = await unpackCatalog(blob, payload.catalogKey);
+      const body = JSON.parse(new TextDecoder().decode(bytes)) as GuestCatalogBody;
+      if (body.version !== CATALOG_VERSION || body.passId !== payload.passId || !Array.isArray(body.items)) {
+        throw new Error("Unrecognized catalog format");
       }
-
-      const passRecs = payload.weeklyRecommendations || {};
-      const allGuestRecs: WeeklyRecommendation[] = [];
-
-      const matchingItems: MediaItem[] = [];
-      for (const item of backupItems) {
-        if (sharedLibOriginalIds.has(item.libraryId)) {
-          // Adjust remote path and libraryId to match the scoped pass
-          const scopedLibId = `shared_${item.libraryId}`;
-          let scopedRemotePath = rewriteRemotePath(item.remotePath, guestImportMapping);
-
-          const libRecs = passRecs[item.libraryId] || [];
-          const recMatch = libRecs.find(
-            (r) =>
-              r.itemId === item.id ||
-              r.title.toLowerCase().trim() === item.title.toLowerCase().trim()
-          );
-
-          const isRecommended = Boolean(recMatch);
-          const recommendationBadge = recMatch
-            ? {
-                text: recMatch.badgeText || "Curator Pick",
-                effect: recMatch.badgeEffect || "glow",
-                note: recMatch.note,
-              }
-            : undefined;
-
-          // Remap to the guest-side item id (items are re-id'd shared_${id} below)
-          if (recMatch) allGuestRecs.push({ ...recMatch, itemId: `shared_${item.id}` });
-
-          const updatedVersions = Array.isArray(item.versions)
-            ? item.versions.map((v) => {
-                const nextRemotePath = v.remotePath ? rewriteRemotePath(v.remotePath, guestImportMapping) : v.remotePath;
-                const nextRemoteName =
-                  guestImportMapping[v.remoteName] ||
-                  (v.remoteName && !v.remoteName.startsWith("shared_") && !/^https?$/i.test(v.remoteName)
-                    ? `shared_${v.remoteName}`
-                    : v.remoteName);
-                return {
-                  ...v,
-                  remotePath: nextRemotePath,
-                  remoteName: nextRemoteName,
-                };
-              })
-            : item.versions;
-
-          // If primary remotePath points to a remote not in scopedRcloneConfig (e.g. streamtape loopback),
-          // promote the first version whose remote is in availableScopedRemotes
-          const primaryColon = scopedRemotePath.indexOf(":");
-          const primaryPrefix =
-            primaryColon !== -1 && !/^https?:\/\//i.test(scopedRemotePath)
-              ? scopedRemotePath.slice(0, primaryColon)
-              : "";
-          if (primaryPrefix && !availableScopedRemotes.has(primaryPrefix) && Array.isArray(updatedVersions)) {
-            const playableVersion = updatedVersions.find((v) => {
-              if (!v.remotePath || /^https?:\/\//i.test(v.remotePath)) return false;
-              const c = v.remotePath.indexOf(":");
-              return c !== -1 && availableScopedRemotes.has(v.remotePath.slice(0, c));
-            });
-            if (playableVersion?.remotePath) {
-              scopedRemotePath = playableVersion.remotePath;
-            }
-          }
-
-          matchingItems.push({
-            ...item,
-            id: `shared_${item.id}`,
-            libraryId: scopedLibId,
-            remotePath: scopedRemotePath,
-            versions: updatedVersions,
-            isRecommended,
-            recommendationBadge,
-          });
-        }
+      rawItems = body.items;
+      recs = body.weeklyRecommendations || recs;
+      try {
+        const m = JSON.parse(
+          new TextDecoder().decode(await rcloneReadBytes(resolvedConfigPath, payload.manifestPath || ""))
+        ) as CatalogManifest;
+        if (m.hash === (await sha256Hex(bytes))) initialSync = { updatedAt: m.updatedAt, hash: m.hash };
+      } catch {
+        /* no manifest: first sync will simply re-download */
       }
+    } else if (payload.backupPath) {
+      // Legacy pass: single grantor backup (full-library JSON)
+      const backupData = JSON.parse(await rcloneReadBackup(resolvedConfigPath, payload.backupPath));
+      rawItems = Object.values(backupData?.mediaItems || {}) as MediaItem[];
+    }
 
-      if (allGuestRecs.length > 0) {
-        useAppStore.setState({ guestRecommendations: allGuestRecs });
-      }
+    const built = buildGuestLibraryStateFromItems({
+      rawItems,
+      sourceLibraryIds: new Set(payload.sharedLibraries.map((l) => l.id)),
+      remoteMapping: guestImportMapping,
+      availableScopedRemotes,
+      weeklyRecommendations: recs,
+    });
 
-      if (matchingItems.length > 0) {
-        setLibrarySyncPaused(true);
-        try {
-          await persistItems(matchingItems);
-          s.bulkUpsertMediaItems(matchingItems);
-        } finally {
-          setLibrarySyncPaused(false);
-        }
-        ingestedCount = matchingItems.length;
+    if (built.guestRecommendations.length > 0) {
+      const own = new Set(built.items.map((i) => i.id));
+      useAppStore.setState((st) => ({
+        guestRecommendations: mergeGuestRecommendations(st.guestRecommendations, own, built.guestRecommendations),
+      }));
+    }
+    if (built.items.length > 0) {
+      setLibrarySyncPaused(true);
+      try {
+        await persistItems(built.items);
+        s.bulkUpsertMediaItems(built.items);
+      } finally {
+        setLibrarySyncPaused(false);
       }
+      ingestedCount = built.items.length;
     }
   } catch (err) {
-    log.warn("access-pass", `Could not ingest remote backup metadata: ${err}`);
+    log.warn("access-pass", `Could not ingest remote catalog: ${err}`);
   }
 
   // 4. Register shared libraries in store
   onProgress?.("Registering shared libraries...");
+  const passSync: PassSyncInfo | undefined =
+    payload.catalogKey && payload.catalogPath && payload.manifestPath
+      ? {
+          tokenPath: payload.tokenPath,
+          manifestPath: payload.manifestPath,
+          catalogPath: payload.catalogPath,
+          catalogKey: payload.catalogKey,
+          remoteMapping: guestImportMapping,
+          updatedAt: initialSync?.updatedAt,
+          hash: initialSync?.hash,
+        }
+      : undefined;
   for (const lib of payload.sharedLibraries) {
     s.addLibrary({
       id: `shared_${lib.id}`,
@@ -1318,6 +1457,7 @@ export async function importAccessPass(
       expiresAt: expiresAt,
       isExpired: false,
       grantorLabel: payload.label,
+      passSync,
     });
   }
 
@@ -1436,11 +1576,26 @@ export async function removeSharedPass(passId: string): Promise<void> {
       const colon = rp.indexOf(":");
       if (colon !== -1) {
         const remote = rp.slice(0, colon);
-        if (remote.startsWith("shared_")) {
-          remotesToRemove.add(remote);
-        }
+        if (remote.startsWith("shared_")) remotesToRemove.add(remote);
       }
     }
+    // The pass's own token/catalog remote may not appear in any library path.
+    const tp = lib.passSync?.tokenPath;
+    if (tp && tp.indexOf(":") !== -1) {
+      const r = tp.slice(0, tp.indexOf(":"));
+      if (r.startsWith("shared_")) remotesToRemove.add(r);
+    }
+  }
+  // Never delete a scoped remote another imported pass still uses (names are per-export and can collide).
+  for (const other of s.libraries) {
+    if (!other.isSharedPass || other.passId === passId) continue;
+    for (const rp of other.remotePaths) {
+      const c = rp.indexOf(":");
+      if (c !== -1) remotesToRemove.delete(rp.slice(0, c));
+    }
+    for (const anon of Object.values(other.passSync?.remoteMapping || {})) remotesToRemove.delete(anon);
+    const otp = other.passSync?.tokenPath;
+    if (otp && otp.indexOf(":") !== -1) remotesToRemove.delete(otp.slice(0, otp.indexOf(":")));
   }
 
   // 2. Remove remotes from rclone config
@@ -1617,7 +1772,7 @@ export async function extendIssuedPass(
     label: pass.label,
     duration: additionalDuration === "lifetime" ? "lifetime" : pass.duration,
     createdAt: pass.createdAt,
-    status: pass.status === "unclaimed" ? "unclaimed" : "claimed",
+    status: pass.status === "unclaimed" ? "unclaimed" : pass.status === "revoked" ? "revoked" : "claimed",
     claimedBy: null,
     claimedAt: pass.claimedAt || now,
     expiresAt: newExpiresAt,
@@ -1629,7 +1784,7 @@ export async function extendIssuedPass(
     updatedToken = {
       ...existing,
       duration: additionalDuration === "lifetime" ? "lifetime" : existing.duration,
-      status: existing.status === "unclaimed" ? "unclaimed" : "claimed",
+      status: existing.status === "unclaimed" ? "unclaimed" : existing.status === "revoked" ? "revoked" : "claimed",
       expiresAt: newExpiresAt,
     };
   } catch {
@@ -1687,8 +1842,280 @@ export async function refreshGuestPassStatus(passId: string): Promise<boolean> {
 
 export function formatRemoteDisplayName(name: string): string {
   return name
-    .replace(/^shared_fast_(\d+)$/i, "Fast Cloud Remote $1")
-    .replace(/^shared_cloud_(\d+)$/i, "Cloud Remote $1")
+    .replace(/^shared_(?:[a-z0-9]{4}_)?fast_(\d+)$/i, "Fast Cloud Remote $1")
+    .replace(/^shared_(?:[a-z0-9]{4}_)?cloud_(\d+)$/i, "Cloud Remote $1")
     .replace(/^shared_/i, "Shared ");
+}
+
+export type PublishSummary = {
+  updated: number;
+  unchanged: number;
+  skipped: Array<{ passId: string; label: string; reason: string }>;
+  failed: Array<{ passId: string; label: string; error: string }>;
+};
+
+let publishChain: Promise<unknown> = Promise.resolve();
+
+/** Serialised: concurrent triggers (scan end + Push button) run one after the other. */
+export function publishUpdatesToIssuedPasses(
+  options: { passIds?: string[]; force?: boolean } = {}
+): Promise<PublishSummary> {
+  const run = publishChain.then(
+    () => doPublish(options),
+    () => doPublish(options)
+  );
+  publishChain = run.catch(() => {});
+  return run;
+}
+
+async function doPublish(options: { passIds?: string[]; force?: boolean }): Promise<PublishSummary> {
+  const summary: PublishSummary = { updated: 0, unchanged: 0, skipped: [], failed: [] };
+  const s0 = useAppStore.getState();
+  if (!s0.rcloneConfigPath) return summary;
+
+  const passes = (s0.issuedPasses || []).filter(
+    (p) =>
+      p.status !== "revoked" &&
+      p.status !== "expired" &&
+      (!options.passIds || options.passIds.includes(p.passId))
+  );
+
+  for (const pass of passes) {
+    try {
+      if (!pass.catalogKey) {
+        summary.skipped.push({ passId: pass.passId, label: pass.label, reason: "Issued before live updates existed — re-issue the pass." });
+        continue;
+      }
+
+      const s = useAppStore.getState();
+      const libs = pass.sharedLibraries.map((sl) => {
+        const live = s.libraries.find((l) => l.id === sl.id);
+        return { id: sl.id, name: live?.name ?? sl.name, type: live?.type ?? sl.type };
+      });
+      const body = buildGuestCatalogBody({
+        passId: pass.passId,
+        libraries: libs,
+        mediaItems: s.mediaItems,
+        picks: s.adminWeeklyRecommendations || {},
+      });
+      const { bytes, hash } = await encodeBody(body);
+      const n = body.items.length;
+      const prev = pass.catalogItemCount ?? 0;
+
+      // Local content-hash & shrink guards run BEFORE any remote rclone calls so startup catch-up / no-op debounce triggers do zero network I/O.
+      if (!options.force) {
+        if (n === 0 && prev > 0) {
+          summary.skipped.push({ passId: pass.passId, label: pass.label, reason: "Library looks empty right now; not publishing." });
+          continue;
+        }
+        if (prev >= 20 && n < prev * 0.5) {
+          summary.skipped.push({ passId: pass.passId, label: pass.label, reason: `Item count dropped ${prev} → ${n}; not publishing (use Push Updates to force).` });
+          continue;
+        }
+        if (hash === pass.catalogHash) {
+          summary.unchanged++;
+          continue;
+        }
+      }
+
+      // Read-only token check: never write the token here.
+      try {
+        const tok = JSON.parse(
+          new TextDecoder().decode(await rcloneReadBytes(s0.rcloneConfigPath, pass.tokenPath))
+        ) as PassToken;
+        if (tok.status === "revoked" || tok.status === "expired") {
+          useAppStore.getState().updateIssuedPass(pass.passId, { status: tok.status });
+          summary.skipped.push({ passId: pass.passId, label: pass.label, reason: `Pass is ${tok.status}.` });
+          continue;
+        }
+      } catch {
+        summary.skipped.push({ passId: pass.passId, label: pass.label, reason: "Pass token not reachable." });
+        continue;
+      }
+
+      const updatedAt = Date.now();
+      await uploadCatalogFiles({
+        configPath: s.rcloneConfigPath,
+        remote: pass.remoteName,
+        passId: pass.passId,
+        catalogKey: pass.catalogKey,
+        bytes,
+        hash,
+        itemCount: n,
+        updatedAt,
+      });
+      useAppStore.getState().updateIssuedPass(pass.passId, {
+        catalogHash: hash,
+        catalogUpdatedAt: updatedAt,
+        catalogItemCount: n,
+        lastPublishedAt: updatedAt,
+      });
+      summary.updated++;
+    } catch (err) {
+      summary.failed.push({ passId: pass.passId, label: pass.label, error: err instanceof Error ? err.message : String(err) });
+      log.warn("access-pass", `Publish failed for pass ${pass.passId}: ${err}`);
+    }
+  }
+  return summary;
+}
+
+export type SyncSummary = {
+  passId: string;
+  label: string;
+  status: "updated" | "unchanged" | "revoked" | "blocked" | "error";
+  added: number;
+  updated: number;
+  removed: number;
+  message?: string;
+};
+
+let inFlightSync: Promise<SyncSummary[]> | null = null;
+
+export function syncSharedPassLibraries(options: { passId?: string; force?: boolean } = {}): Promise<SyncSummary[]> {
+  if (inFlightSync) return inFlightSync;
+  inFlightSync = doSync(options).finally(() => {
+    inFlightSync = null;
+  });
+  return inFlightSync;
+}
+
+async function doSync(options: { passId?: string; force?: boolean }): Promise<SyncSummary[]> {
+  const results: SyncSummary[] = [];
+  const s0 = useAppStore.getState();
+  const cfg = s0.rcloneConfigPath;
+  if (!cfg) return results;
+
+  const byPass = new Map<string, Library[]>();
+  for (const l of s0.libraries) {
+    if (!l.isSharedPass || l.isExpired || !l.passId || !l.passSync) continue; // legacy libs: nothing to sync
+    if (options.passId && l.passId !== options.passId) continue;
+    byPass.set(l.passId, [...(byPass.get(l.passId) || []), l]);
+  }
+
+  for (const [passId, libs] of byPass) {
+    const ps = libs[0].passSync!;
+    const label = libs[0].grantorLabel || passId;
+    const res: SyncSummary = { passId, label, status: "unchanged", added: 0, updated: 0, removed: 0 };
+    results.push(res);
+    try {
+      // 1. Token: ONLY a parsed "revoked" removes access. Any read/parse failure = "unknown, keep everything".
+      let token: PassToken;
+      try {
+        token = JSON.parse(new TextDecoder().decode(await rcloneReadBytes(cfg, ps.tokenPath))) as PassToken;
+      } catch (e) {
+        res.status = "error";
+        res.message = `Could not reach pass (${e instanceof Error ? e.message : e})`;
+        continue;
+      }
+      if (token.status === "revoked") {
+        await removeSharedPass(passId);
+        res.status = "revoked";
+        continue;
+      }
+      // Host extended the pass (including to lifetime where expiresAt is null): pick up the new expiry without a manual refresh.
+      const nextExpiresAt = token.expiresAt ?? undefined;
+      if (nextExpiresAt !== libs[0].expiresAt) {
+        for (const l of libs) useAppStore.getState().updateLibrary(l.id, { expiresAt: nextExpiresAt, isExpired: false });
+      }
+
+      // 2. Manifest (tiny). Missing = nothing published yet.
+      let manifest: CatalogManifest;
+      try {
+        manifest = JSON.parse(new TextDecoder().decode(await rcloneReadBytes(cfg, ps.manifestPath))) as CatalogManifest;
+      } catch {
+        continue;
+      }
+      if (!options.force && ps.updatedAt && manifest.updatedAt <= ps.updatedAt) continue;
+
+      // 3. Catalog: integrity-checked against the manifest (guards against reading a half-written upload).
+      const blob = await rcloneReadBytes(cfg, ps.catalogPath);
+      const bytes = await unpackCatalog(blob, ps.catalogKey);
+      if ((await sha256Hex(bytes)) !== manifest.hash) {
+        res.status = "error";
+        res.message = "Catalog is still being uploaded; will retry.";
+        continue;
+      }
+      const body = JSON.parse(new TextDecoder().decode(bytes)) as GuestCatalogBody;
+      if (body.version !== CATALOG_VERSION || body.passId !== passId || !Array.isArray(body.items)) {
+        res.status = "error";
+        res.message = "Unrecognized catalog format.";
+        continue;
+      }
+
+      // 4. Map + diff.
+      const s = useAppStore.getState();
+      const guestLibIds = new Set(libs.map((l) => l.id));
+      const sourceIds = new Set(body.libraries.map((l) => l.id).filter((id) => guestLibIds.has(`shared_${id}`)));
+      // ONLY scoped pass remotes count as "available" (same meaning as at import). Including the guest's own
+      // remotes would stop version promotion whenever they happen to own a remote with the grantor's name.
+      const configuredRemotes = new Set<string>(
+        [...(s.remotes || []).map((r) => r.name), ...extractSectionNames(s.rcloneConfigContent || "")].filter((n) =>
+          n.startsWith("shared_")
+        )
+      );
+      const available =
+        configuredRemotes.size > 0 ? configuredRemotes : new Set(Object.values(ps.remoteMapping));
+      const mapping: Record<string, string> = {};
+      for (const [orig, anon] of Object.entries(ps.remoteMapping)) if (available.has(anon)) mapping[orig] = anon;
+
+      const built = buildGuestLibraryStateFromItems({
+        rawItems: body.items,
+        sourceLibraryIds: sourceIds,
+        remoteMapping: mapping,
+        availableScopedRemotes: available,
+        weeklyRecommendations: body.weeklyRecommendations,
+      });
+      const existing = Object.values(s.mediaItems).filter((i) => guestLibIds.has(i.libraryId));
+      const plan = planCatalogApply(existing, built.items, { force: options.force });
+      if (plan.blocked) {
+        res.status = "blocked";
+        res.message = plan.blocked;
+        continue;
+      }
+
+      // 5. Apply (SQLite + store inside setLibrarySyncPaused so libraryDb's subscriber doesn't double-write/delete).
+      const st = useAppStore.getState();
+      setLibrarySyncPaused(true);
+      try {
+        await deleteItems(plan.removedIds);
+        await persistItems(plan.toUpsert);
+        st.removeMediaItemsBulk(plan.removedIds);
+        st.bulkUpsertMediaItems(plan.toUpsert);
+      } finally {
+        setLibrarySyncPaused(false);
+      }
+
+      const passItemIds = new Set(built.items.map((i) => i.id));
+      for (const id of plan.removedIds) passItemIds.add(id);
+      useAppStore.setState((cur) => ({
+        guestRecommendations: mergeGuestRecommendations(cur.guestRecommendations, passItemIds, built.guestRecommendations),
+      }));
+
+      for (const meta of body.libraries) {
+        const gl = libs.find((l) => l.id === `shared_${meta.id}`);
+        if (!gl) continue;
+        const nextName = `${meta.name} (${gl.grantorLabel || "Shared"})`;
+        st.updateLibrary(gl.id, {
+          ...(nextName !== gl.name ? { name: nextName } : {}),
+          passSync: { ...ps, updatedAt: manifest.updatedAt, hash: manifest.hash },
+        });
+      }
+      for (const gl of libs) {
+        if (!body.libraries.some((m) => `shared_${m.id}` === gl.id)) {
+          st.updateLibrary(gl.id, { passSync: { ...ps, updatedAt: manifest.updatedAt, hash: manifest.hash } });
+        }
+      }
+
+      res.status = plan.added + plan.updated + plan.removedIds.length > 0 ? "updated" : "unchanged";
+      res.added = plan.added;
+      res.updated = plan.updated;
+      res.removed = plan.removedIds.length;
+    } catch (err) {
+      res.status = "error";
+      res.message = err instanceof Error ? err.message : String(err);
+      log.warn("access-pass", `Sync failed for pass ${passId}: ${res.message}`);
+    }
+  }
+  return results;
 }
 

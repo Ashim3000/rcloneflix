@@ -13,6 +13,7 @@ import {
   formatDuration,
   uint8ArrayToBase64,
   base64ToUint8Array,
+  buildGuestLibraryStateFromItems,
 } from "./accessPass";
 
 describe("accessPass", () => {
@@ -239,5 +240,50 @@ password = gpass
     expect(rewriteRemotePath("/mnt/chromeos/MyFiles/Downloads/Music/song.mp3", mapping)).toBe("/mnt/chromeos/MyFiles/Downloads/Music/song.mp3");
     expect(rewriteRemotePath("C:\\Users\\User\\Music\\song.mp3", mapping)).toBe("C:\\Users\\User\\Music\\song.mp3");
     expect(rewriteRemotePath("odrivecrypt:Music/song.mp3", mapping)).toBe("shared_odrivecrypt:Music/song.mp3");
+  });
+
+  it("supports per-pass remote name prefixes without colliding across passes", () => {
+    const { scopedConfig, remoteMapping } = extractScopedRcloneConfig(
+      SAMPLE_RCLONE_CONF,
+      ["odrivecrypt"],
+      new Set(),
+      "k3x9_"
+    );
+    expect(remoteMapping["odrivecrypt"]).toBe("shared_k3x9_cloud_1");
+    expect(remoteMapping["drivemine"]).toBe("shared_k3x9_cloud_2");
+    expect(formatRemoteDisplayName("shared_k3x9_cloud_1")).toBe("Cloud Remote 1");
+    expect(formatRemoteDisplayName("shared_k3x9_fast_2")).toBe("Fast Cloud Remote 2");
+    expect(scopedConfig).toContain("[shared_k3x9_cloud_1]");
+    expect(scopedConfig).toContain("remote = shared_k3x9_cloud_2:encrypted_vault");
+  });
+
+  it("buildGuestLibraryStateFromItems rewrites remotes/ids, promotes playable versions, attaches picks", () => {
+    const raw = [
+      { id: "m1", libraryId: "L1", title: "Movie", remotePath: "drivemine:Movies/M.mkv", libraryType: "movies" },
+      {
+        id: "m2",
+        libraryId: "L1",
+        title: "Offload",
+        remotePath: "streamtape:/x",
+        libraryType: "movies",
+        versions: [{ id: "v", remoteName: "udrop", remotePath: "udrop:/x.mkv" }],
+      },
+      { id: "m3", libraryId: "PRIVATE", title: "Private", remotePath: "drivemine:P.mkv", libraryType: "movies" },
+    ] as any[];
+    const out = buildGuestLibraryStateFromItems({
+      rawItems: raw,
+      sourceLibraryIds: new Set(["L1"]),
+      remoteMapping: { drivemine: "shared_cloud_1", udrop: "shared_fast_1" },
+      availableScopedRemotes: new Set(["shared_cloud_1", "shared_fast_1"]),
+      weeklyRecommendations: {
+        L1: [{ itemId: "m1", title: "Movie", badgeText: "Pick", badgeEffect: "glow", addedAt: 1 } as any],
+      },
+    });
+    expect(out.items.map((i) => i.id)).toEqual(["shared_m1", "shared_m2"]);
+    expect(out.items[0].remotePath).toBe("shared_cloud_1:Movies/M.mkv");
+    expect(out.items[0].libraryId).toBe("shared_L1");
+    expect(out.items[0].isRecommended).toBe(true);
+    expect(out.items[1].remotePath).toBe("shared_fast_1:/x.mkv");
+    expect(out.guestRecommendations[0].itemId).toBe("shared_m1");
   });
 });
