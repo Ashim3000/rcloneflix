@@ -2990,7 +2990,23 @@ The following items (100–125) were identified during the comprehensive v0.9.76
 
 ---
 
-*Document updated: 26 November 2026 — Version 1.0.42: InfiniDysk Streaming Remediation, Save-to-Remote, Subscription Routing, Stash-Box, 9anime Extractor & Music Discovery Release*
+### 195. IMPLEMENTED (v1.0.43) — `find_yt_dlp_binary()` Shadowing User `~/.local/bin/yt-dlp` on Linux `.deb`
+* **Platform:** Desktop (`src-tauri/src/commands/download.rs`)
+* **Root Cause:** `find_yt_dlp_binary()` checked `std::env::current_exe().parent().join("yt-dlp")` first. On Linux `.deb` installs where the binary is `/usr/bin/rcloneflix`, this resolved `/usr/bin/yt-dlp` (`2023.03.04`) ahead of user-installed `~/.local/bin/yt-dlp` (`2026.07.04`), causing YouTube `ytsearch1:` music grabs to fail with `Requested format is not available`. Additionally, forcing a Chrome `User-Agent` header on non-HTTP `ytsearch1:` targets interfered with `yt-dlp` client headers.
+* **Resolution:** Updated `find_yt_dlp_binary()` (via `collect_yt_dlp_candidates`) to skip system bin directories (`/usr/bin`, `/bin`, `/usr/local/bin`) during the `current_exe().parent()` check so `~/.local/bin/yt-dlp` takes priority, added `-f bestaudio/best` for `is_audio_extract`, restricted the Chrome `User-Agent` header override to HTTP(S) URLs, and added unit test `test_yt_dlp_candidate_order_skips_usr_bin_first`.
+* **Status:** `IMPLEMENTED`
+
+---
+
+### 196. IMPLEMENTED (v1.0.43) — Music Discovery InfiniDysk Cloud-Worker Routing & Hardcoded `"movies"` Defaults
+* **Platform:** Frontend (`src/components/discovery/InfiniDyskSearchModal.tsx`, `src/components/library/AddStreamBookmarkModal.tsx`)
+* **Root Cause:** (1) `InfiniDyskSearchModal` exposed `Save/Convert` (`CloudTranscodeModal` AV1 Kaggle/GHA video worker) on Music/audio NZBs instead of direct local/WebDAV library saving; (2) `AddStreamBookmarkModal` (`defaultLibraryType="movies"`), `CloudTranscodeModal` (missing `mediaType`), and `handlePlayNzb` (`libraryType: "movies"`, unconditional `/play/video`) hardcoded `"movies"` even when opened from Music Discover with `defaultLibraryType="music"`; (3) `AddStreamBookmarkModal.runInspect` checked `media_type === "music"` but missed `media_type === "audio"` and direct audio file extensions.
+* **Resolution:** Added direct non-cloud `handleSaveNzbToLibrary` (downloading tracks via local InfiniDysk WebDAV `downloadWebStream` into writable non-shared target libraries) and replaced `Save/Convert` on non-video/audio InfiniDysk rows with `Save to Library` / Bookmark; routed `effectiveLibraryType` & `defaultLibraryId` through `AddStreamBookmarkModal`, `CloudTranscodeModal`, and `handlePlayNzb` (dispatching `rcloneflix:play-audio` with sorted track playlists for audio releases); updated `isAudioDetected` in `AddStreamBookmarkModal.tsx`.
+* **Status:** `IMPLEMENTED`
+
+---
+
+*Document updated: 26 November 2026 — Version 1.0.43: `yt-dlp` Path Priority & Music Discovery InfiniDysk Routing Fix*
 
 
 

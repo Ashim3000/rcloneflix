@@ -7,8 +7,10 @@ import {
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useNavigate } from "react-router-dom";
-import { useAppStore, type MediaItem } from "../../store/appStore";
+import { useAppStore, type LibraryType, type MediaItem } from "../../store/appStore";
 import { useToastStore } from "../../store/toastStore";
+import { downloadWebStream } from "../../lib/streamResolver";
+import { safeSegment } from "../../lib/musicDiscovery";
 import { AddStreamBookmarkModal } from "../library/AddStreamBookmarkModal";
 import { CloudTransferModal } from "../explorer/CloudTransferModal";
 import { CloudTranscodeModal } from "../library/CloudTranscodeModal";
@@ -75,6 +77,7 @@ export function InfiniDyskSearchModal({
 }: Props) {
   const navigate = useNavigate();
   const addToast = useToastStore((s) => s.addToast);
+  const { libraries, rcloneConfigPath } = useAppStore();
 
   const [query, setQuery] = useState(initialQuery);
   const [loading, setLoading] = useState(false);
@@ -92,6 +95,15 @@ export function InfiniDyskSearchModal({
   const [categoryOverride, setCategoryOverride] = useState<string>(item?.libraryType || defaultLibraryType || "uncategorized");
 
   const resolvedCategoryType = item?.libraryType || (categoryOverride === "uncategorized" ? null : categoryOverride);
+  const effectiveLibraryType: LibraryType =
+    resolvedCategoryType === "music_videos"
+      ? "music"
+      : ((resolvedCategoryType as LibraryType) || "movies");
+  const isNonVideoCategory = ["music", "audiobooks", "books", "comics"].includes(resolvedCategoryType || "");
+  const targetLibrary =
+    libraries.find((l) => l.id === item?.libraryId) ||
+    libraries.find((l) => l.type === effectiveLibraryType && !l.isSharedPass) ||
+    libraries.find((l) => l.type === effectiveLibraryType);
 
   const toggleNzbFiles = async (nzb: UsenetSearchResult) => {
     if (expandedNzb === nzb.nzb_url) {
@@ -161,6 +173,84 @@ export function InfiniDyskSearchModal({
     }
   };
 
+  const isAudioRelease = (playables: NzbPlayable[], best: NzbPlayable) =>
+    resolvedCategoryType === "music" ||
+    resolvedCategoryType === "audiobooks" ||
+    best.kind === "audio" ||
+    playables.every((p) => p.kind === "audio");
+
+  const handleSaveNzbToLibrary = async (nzb: UsenetSearchResult) => {
+    setIngestingUrl(nzb.nzb_url);
+    try {
+      const playables = await invoke<NzbPlayable[]>(
+        "parse_nzb_media_files",
+        {
+          nzbUrl: nzb.nzb_url,
+          nzbXml: null,
+          password: null,
+          virtualDir: deriveVirtualDir(nzb.title, resolvedCategoryType),
+        }
+      );
+
+      if (!playables || playables.length === 0) {
+        addToast("No playable media files found inside this NZB release", "error");
+        return;
+      }
+
+      const sorted = [...playables].sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { numeric: true })
+      );
+      const best = [...sorted].sort((a, b) => b.size - a.size)[0];
+
+      const writableLib =
+        libraries.find((l) => l.id === item?.libraryId && !l.isSharedPass && l.remotePaths?.length) ||
+        libraries.find((l) => l.type === effectiveLibraryType && !l.isSharedPass && l.remotePaths?.length);
+
+      const baseRoot = writableLib?.remotePaths?.find((p) => {
+        const clean = p.trim();
+        const colon = clean.indexOf(":");
+        return !(colon > 1 && clean.slice(0, colon).toLowerCase().startsWith("shared_"));
+      })?.replace(/[\\/]+$/, "");
+
+      if (!baseRoot) {
+        setBookmarkTarget({ url: davStreamUrl(best), title: nzb.title || best.name });
+        return;
+      }
+
+      const isLocalRoot =
+        baseRoot.startsWith("/") ||
+        baseRoot.startsWith("\\") ||
+        /^[a-zA-Z]:[/\\]/.test(baseRoot);
+      const releaseFolder = `${baseRoot}/${safeSegment(nzb.title)}`;
+      const baseTs = Date.now();
+
+      for (let i = 0; i < sorted.length; i++) {
+        const f = sorted[i];
+        const fileUrl = davStreamUrl(f);
+        const leafName = f.name.split(/[\\/]/).pop() || f.name;
+        await downloadWebStream({
+          download_id: `usenet-lib-${baseTs}-${i}`,
+          stream_url: fileUrl,
+          original_url: fileUrl,
+          filename: leafName,
+          destination_dir: isLocalRoot ? releaseFolder : undefined,
+          remote_upload_path: !isLocalRoot ? releaseFolder : undefined,
+          config_path: rcloneConfigPath,
+        });
+      }
+
+      addToast(
+        `Queued ${sorted.length} file${sorted.length !== 1 ? "s" : ""} from "${nzb.title}" → ${writableLib!.name} (direct transfer)`,
+        "success",
+        5000
+      );
+    } catch (err: any) {
+      addToast(`Failed to save NZB to library: ${err?.message || err}`, "error");
+    } finally {
+      setIngestingUrl(null);
+    }
+  };
+
   const handlePlayNzb = async (nzb: UsenetSearchResult) => {
     setIngestingUrl(nzb.nzb_url);
     try {
@@ -180,14 +270,46 @@ export function InfiniDyskSearchModal({
       }
 
       const best = [...playables].sort((a, b) => b.size - a.size)[0];
-      const streamUrl = davStreamUrl(best);
-
       const now = Date.now();
+
+      if (isAudioRelease(playables, best)) {
+        const audioTracks = [...playables]
+          .filter((p) => p.kind === "audio" || playables.length === 1)
+          .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+        const playlistItems: MediaItem[] = (audioTracks.length ? audioTracks : [best]).map((f, idx) => {
+          const url = davStreamUrl(f);
+          return {
+            ...(item || {} as MediaItem),
+            id: item?.id && audioTracks.length === 1 ? item.id : `usenet-audio-${now}-${idx}`,
+            libraryId: item?.libraryId || targetLibrary?.id || "usenet",
+            libraryType: (item?.libraryType || (resolvedCategoryType === "audiobooks" ? "audiobooks" : "music")) as any,
+            title: f.name,
+            album: nzb.title,
+            filename: f.name,
+            trackNumber: idx + 1,
+            remotePath: url,
+            streamUrl: url,
+            sourceUrl: url,
+            addedAt: item?.addedAt || now,
+            lastScannedAt: item?.lastScannedAt || now,
+            isSourceBookmark: true,
+          };
+        });
+        onClose();
+        window.dispatchEvent(
+          new CustomEvent("rcloneflix:play-audio", {
+            detail: { playlist: playlistItems, playlistIndex: 0 },
+          })
+        );
+        return;
+      }
+
+      const streamUrl = davStreamUrl(best);
       const playItem: MediaItem = {
         ...(item || {} as MediaItem),
         id: item?.id || `usenet-${now}`,
-        libraryId: item?.libraryId || "usenet",
-        libraryType: item?.libraryType || "movies",
+        libraryId: item?.libraryId || targetLibrary?.id || "usenet",
+        libraryType: (item?.libraryType || effectiveLibraryType) as any,
         title: item?.title || nzb.title,
         filename: best.name,
         remotePath: streamUrl,
@@ -418,15 +540,28 @@ export function InfiniDyskSearchModal({
                             {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                           </button>
 
-                          <button
-                            type="button"
-                            onClick={() => setTranscodeTarget({ url: res.nzb_url, title: res.title })}
-                            className="px-2.5 py-1.5 rounded-lg border border-border bg-surface hover:bg-panel text-amber-400 hover:border-amber-500/40 text-xs flex items-center gap-1 transition-colors cursor-pointer"
-                            title="Save / Transcode via Cloud Worker to your remote"
-                          >
-                            <Zap size={13} />
-                            <span>Save/Convert</span>
-                          </button>
+                          {isNonVideoCategory ? (
+                            <button
+                              type="button"
+                              onClick={() => handleSaveNzbToLibrary(res)}
+                              disabled={isIngesting}
+                              className="px-2.5 py-1.5 rounded-lg border border-border bg-surface hover:bg-panel text-emerald-400 hover:border-emerald-500/40 text-xs flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
+                              title={`Save directly to ${targetLibrary?.name || effectiveLibraryType} library (no cloud worker)`}
+                            >
+                              <Download size={13} />
+                              <span>Save to Library</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setTranscodeTarget({ url: res.nzb_url, title: res.title })}
+                              className="px-2.5 py-1.5 rounded-lg border border-border bg-surface hover:bg-panel text-amber-400 hover:border-amber-500/40 text-xs flex items-center gap-1 transition-colors cursor-pointer"
+                              title="Save / Transcode via Cloud Worker to your remote"
+                            >
+                              <Zap size={13} />
+                              <span>Save/Convert</span>
+                            </button>
+                          )}
 
                           <button
                             type="button"
@@ -530,8 +665,8 @@ export function InfiniDyskSearchModal({
                                           const playItem: MediaItem = {
                                             ...(item || {} as MediaItem),
                                             id: `usenet-file-${now}`,
-                                            libraryId: "usenet",
-                                            libraryType: (f.kind === "audio" ? "music" : "movies") as any,
+                                            libraryId: targetLibrary?.id || "usenet",
+                                            libraryType: (f.kind === "audio" ? (resolvedCategoryType === "audiobooks" ? "audiobooks" : "music") : effectiveLibraryType) as any,
                                             title: f.name,
                                             filename: f.name,
                                             remotePath: fileStreamUrl,
@@ -557,14 +692,25 @@ export function InfiniDyskSearchModal({
                                       >
                                         <Play size={12} fill="currentColor" />
                                       </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setTranscodeTarget({ url: fileStreamUrl, title: f.name })}
-                                        className="p-1.5 rounded-lg bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 cursor-pointer"
-                                        title="Save / Convert this file"
-                                      >
-                                        <Zap size={12} />
-                                      </button>
+                                      {f.kind === "audio" || isNonVideoCategory ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => setBookmarkTarget({ url: fileStreamUrl, title: f.name })}
+                                          className="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 cursor-pointer"
+                                          title={`Bookmark / Save to ${targetLibrary?.name || effectiveLibraryType} library`}
+                                        >
+                                          <Bookmark size={12} />
+                                        </button>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={() => setTranscodeTarget({ url: fileStreamUrl, title: f.name })}
+                                          className="p-1.5 rounded-lg bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 cursor-pointer"
+                                          title="Save / Convert this file"
+                                        >
+                                          <Zap size={12} />
+                                        </button>
+                                      )}
                                     </div>
                                   </div>
                                 );
@@ -592,7 +738,8 @@ export function InfiniDyskSearchModal({
           onClose={() => setBookmarkTarget(null)}
           initialUrl={bookmarkTarget.url}
           initialTitle={bookmarkTarget.title}
-          defaultLibraryType="movies"
+          defaultLibraryType={effectiveLibraryType}
+          defaultLibraryId={targetLibrary?.id}
           autoInspect={true}
         />
       )}
@@ -603,6 +750,7 @@ export function InfiniDyskSearchModal({
           onClose={() => setTranscodeTarget(null)}
           sourceInput={transcodeTarget.url}
           initialTitle={transcodeTarget.title}
+          mediaType={effectiveLibraryType}
         />
       )}
 

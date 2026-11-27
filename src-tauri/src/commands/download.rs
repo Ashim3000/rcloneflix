@@ -504,30 +504,53 @@ pub fn find_downloaded_file(
     Ok(None)
 }
 
-/// Locate yt-dlp binary on the host system (checking current exe dir, winget, local app data, ~/.local/bin, /usr/local/bin, /usr/bin, or PATH)
-pub fn find_yt_dlp_binary() -> Option<PathBuf> {
+fn is_system_bin_dir(dir: &std::path::Path) -> bool {
+    matches!(
+        dir.to_str(),
+        Some("/usr/bin") | Some("/bin") | Some("/usr/local/bin")
+    )
+}
+
+fn collect_yt_dlp_candidates(
+    exe_dir: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+    local_app_data: Option<&std::path::Path>,
+) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
+    // Prefer an app-bundled yt-dlp only when NOT running from a system bin dir (e.g. /usr/bin on Linux .deb),
+    // otherwise system-distro ancient apt packages would shadow user-updated ~/.local/bin/yt-dlp.
+    if let Some(dir) = exe_dir {
+        if !is_system_bin_dir(dir) {
             candidates.push(dir.join("yt-dlp.exe"));
             candidates.push(dir.join("yt-dlp"));
         }
     }
-    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-        let h = PathBuf::from(&home);
+    if let Some(h) = home {
         candidates.push(h.join(".local/bin/yt-dlp"));
         candidates.push(h.join(".local/bin/yt-dlp.exe"));
         candidates.push(h.join("AppData/Local/Microsoft/WinGet/Links/yt-dlp.exe"));
     }
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        let lad = PathBuf::from(&local_app_data);
+    if let Some(lad) = local_app_data {
         candidates.push(lad.join("Microsoft/WinGet/Links/yt-dlp.exe"));
         candidates.push(lad.join("Programs/yt-dlp/yt-dlp.exe"));
     }
     candidates.push(PathBuf::from("/usr/local/bin/yt-dlp"));
     candidates.push(PathBuf::from("/usr/bin/yt-dlp"));
+    candidates
+}
 
-    for c in candidates {
+/// Locate yt-dlp binary on the host system (checking non-system exe dir, ~/.local/bin, winget/localappdata, /usr/local/bin, /usr/bin, or PATH)
+pub fn find_yt_dlp_binary() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .map(PathBuf::from);
+    let local_app_data = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from);
+
+    for c in collect_yt_dlp_candidates(exe_dir.as_deref(), home.as_deref(), local_app_data.as_deref()) {
         if c.is_file() {
             return Some(c);
         }
@@ -690,6 +713,7 @@ pub async fn download_web_stream(
                 cmd.args([
                     "--no-warnings",
                     "--no-playlist",
+                    "-f", "bestaudio/best",
                     "-x",
                     "--audio-format", ext_for_task.as_str(),
                     "--audio-quality", "0",
@@ -727,10 +751,12 @@ pub async fn download_web_stream(
             if let Some(ref r) = referer {
                 cmd.args(["--add-header", &format!("Referer: {}", r)]);
             }
-            cmd.args([
-                "--add-header",
-                "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-            ]);
+            if stream_url.starts_with("http") {
+                cmd.args([
+                    "--add-header",
+                    "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                ]);
+            }
             cmd.arg(&stream_url);
 
             let output = cmd.output().await;
@@ -893,5 +919,31 @@ mod tests {
     fn test_find_yt_dlp_binary() {
         let bin = find_yt_dlp_binary();
         assert!(bin.is_some(), "yt-dlp binary should be found on the test environment");
+    }
+
+    #[test]
+    fn test_yt_dlp_candidate_order_skips_usr_bin_first() {
+        let candidates = collect_yt_dlp_candidates(
+            Some(std::path::Path::new("/usr/bin")),
+            Some(std::path::Path::new("/home/tester")),
+            None,
+        );
+        let local_idx = candidates
+            .iter()
+            .position(|p| p == std::path::Path::new("/home/tester/.local/bin/yt-dlp"))
+            .unwrap();
+        let usr_idx = candidates
+            .iter()
+            .position(|p| p == std::path::Path::new("/usr/bin/yt-dlp"))
+            .unwrap();
+        assert!(local_idx < usr_idx, "~/.local/bin/yt-dlp must precede /usr/bin/yt-dlp");
+
+        let custom_dir = collect_yt_dlp_candidates(
+            Some(std::path::Path::new("/opt/RcloneFlix")),
+            Some(std::path::Path::new("/home/tester")),
+            None,
+        );
+        assert_eq!(custom_dir[0], std::path::Path::new("/opt/RcloneFlix/yt-dlp.exe"));
+        assert_eq!(custom_dir[1], std::path::Path::new("/opt/RcloneFlix/yt-dlp"));
     }
 }

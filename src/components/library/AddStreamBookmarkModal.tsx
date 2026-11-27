@@ -134,6 +134,8 @@ export function AddStreamBookmarkModal({
       let targetType = libraryType;
       const isAudioDetected =
         info.media_type === "music" ||
+        info.media_type === "audio" ||
+        /\.(mp3|flac|m4a|opus|ogg|wav|aac)(?:$|\?)/i.test(trimmed) ||
         trimmed.includes("iheart") ||
         trimmed.includes("ihrhls") ||
         trimmed.includes("revma") ||
@@ -269,7 +271,9 @@ export function AddStreamBookmarkModal({
       }
     } else if (defaultLibraryType) {
       setLibraryType(defaultLibraryType);
-      const match = libraries.find((l) => l.type === defaultLibraryType);
+      const match =
+        libraries.find((l) => l.type === defaultLibraryType && !l.isSharedPass) ||
+        libraries.find((l) => l.type === defaultLibraryType);
       if (match) {
         setSelectedLibraryId(match.id);
         if (match.remotePaths?.length) setSelectedRemotePath(match.remotePaths[0]);
